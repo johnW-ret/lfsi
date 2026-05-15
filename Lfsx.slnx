@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Lfsx.App/Lfsx.App.fsproj" />
+    <Project Path="src/Lfsx.Core/Lfsx.Core.fsproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Lfsx.Tests/Lfsx.Tests.fsproj" />
+  </Folder>
+</Solution>
