@@ -8,7 +8,7 @@ module Program =
     let private cellLabel cell =
         match cell.Kind with
         | CellKind.Markdown -> "markdown"
-        | CellKind.Code -> "code"
+        | CellKind.Code -> "fsx"
 
     let private firstLine (source: string) =
         source.Split('\n', StringSplitOptions.RemoveEmptyEntries)
