@@ -12,25 +12,19 @@ type NotebookOutput =
     | Error of string
 
 type NotebookCell =
-    {
-        Id: Guid
-        Kind: CellKind
-        Source: string
-        Outputs: NotebookOutput list
-    }
+    { Id: Guid
+      Kind: CellKind
+      Source: string
+      Outputs: NotebookOutput list }
 
 module NotebookCell =
     let create kind source =
-        {
-            Id = Guid.NewGuid()
-            Kind = kind
-            Source = source
-            Outputs = []
-        }
+        { Id = Guid.NewGuid()
+          Kind = kind
+          Source = source
+          Outputs = [] }
 
 
 type NotebookDocument =
-    {
-        SourcePath: string option
-        Cells: NotebookCell list
-    }
+    { SourcePath: string option
+      Cells: NotebookCell list }

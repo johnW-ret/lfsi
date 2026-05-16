@@ -4,20 +4,17 @@ open System
 open FSharp.Formatting.Literate
 
 type LiterateParseResult =
-    {
-        Document: NotebookDocument
-        FormattingDiagnostics: string list
-    }
+    { Document: NotebookDocument
+      FormattingDiagnostics: string list }
 
 module LiterateScript =
     let private commandCommentMarker = '*'
     let private notFoundIndex = -1
 
     let private normalizeNewlines (text: string) =
-        text.Replace(LiterateSyntax.windowsNewline, LiterateSyntax.unixNewline).Replace(
-            LiterateSyntax.carriageReturn,
-            LiterateSyntax.unixNewline
-        )
+        text
+            .Replace(LiterateSyntax.windowsNewline, LiterateSyntax.unixNewline)
+            .Replace(LiterateSyntax.carriageReturn, LiterateSyntax.unixNewline)
 
     let private trimOneLeadingNewline (text: string) =
         if text.StartsWith(LiterateSyntax.unixNewline, StringComparison.Ordinal) then
@@ -41,7 +38,8 @@ module LiterateScript =
                 endIndex - startIndex - LiterateSyntax.markdownOpenToken.Length
             )
 
-        not (body.Contains(LiterateSyntax.unixNewline, StringComparison.Ordinal)) && String.IsNullOrWhiteSpace body
+        not (body.Contains(LiterateSyntax.unixNewline, StringComparison.Ordinal))
+        && String.IsNullOrWhiteSpace body
 
     let private codeCell source =
         let source = source |> trimOneTrailingNewline
@@ -52,9 +50,7 @@ module LiterateScript =
             Some(block CellKind.Code source)
 
     let private prependIfSome item items =
-        item
-        |> Option.map (fun x -> x :: items)
-        |> Option.defaultValue items
+        item |> Option.map (fun x -> x :: items) |> Option.defaultValue items
 
     let private substring (source: string) startIndex endIndex =
         source.Substring(startIndex, endIndex - startIndex)
@@ -65,7 +61,8 @@ module LiterateScript =
 
     let private findMarkdownStart (source: string) start =
         let rec loop cursor =
-            let index = source.IndexOf(LiterateSyntax.markdownOpenToken, cursor, StringComparison.Ordinal)
+            let index =
+                source.IndexOf(LiterateSyntax.markdownOpenToken, cursor, StringComparison.Ordinal)
 
             if index = notFoundIndex then
                 None
@@ -105,7 +102,8 @@ module LiterateScript =
                     |> fun cell -> prependIfSome cell cells
                     |> List.rev
                 | Some endIndex ->
-                    let body = substring source (startIndex + LiterateSyntax.markdownOpenToken.Length) endIndex
+                    let body =
+                        substring source (startIndex + LiterateSyntax.markdownOpenToken.Length) endIndex
 
                     let cells =
                         if isSingleLineEmptyMarkdownSeparator source startIndex endIndex then
@@ -120,16 +118,14 @@ module LiterateScript =
     let parse (sourcePath: string option) (source: string) =
         let source = normalizeNewlines source
 
-        {
-            Document = { SourcePath = sourcePath; Cells = parseCells source }
-            FormattingDiagnostics =
-                try
-                    let parsed: LiterateDocument =
-                        Literate.ParseScriptString(source, ?path = sourcePath)
+        { Document =
+            { SourcePath = sourcePath
+              Cells = parseCells source }
+          FormattingDiagnostics =
+            try
+                let parsed: LiterateDocument =
+                    Literate.ParseScriptString(source, ?path = sourcePath)
 
-                    parsed.Diagnostics
-                    |> Seq.map string
-                    |> Seq.toList
-                with ex ->
-                    [ ex.Message ]
-        }
+                parsed.Diagnostics |> Seq.map string |> Seq.toList
+            with ex ->
+                [ ex.Message ] }
