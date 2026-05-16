@@ -5,8 +5,8 @@ open System.IO
 open Lfsx.Core
 
 module Program =
-    let private cellLabel cell =
-        match cell.Kind with
+    let private cellKindLabel kind =
+        match kind with
         | CellKind.Markdown -> "markdown"
         | CellKind.Code -> "fsx"
 
@@ -14,6 +14,12 @@ module Program =
         source.Split('\n', StringSplitOptions.RemoveEmptyEntries)
         |> Array.tryHead
         |> Option.defaultValue "(empty)"
+
+    let private formattingStatus diagnostics =
+        if diagnostics |> List.isEmpty then
+            "FSharp.Formatting parse: ok"
+        else
+            "FSharp.Formatting parse: " + String.concat "; " diagnostics
 
     [<EntryPoint>]
     let main argv =
@@ -28,10 +34,11 @@ module Program =
             let parsed = LiterateScript.parse (Some file) source
 
             eprintfn "cells: %d" parsed.Document.Cells.Length
+            eprintfn "%s" (formattingStatus parsed.FormattingDiagnostics)
 
             parsed.Document.Cells
             |> List.iteri (fun index cell ->
-                eprintfn "%02d [%s] %s" (index + 1) (cellLabel cell) (firstLine cell.Source))
+                eprintfn "%02d [%s] %s" (index + 1) (cellKindLabel cell.Kind) (firstLine cell.Source))
 
             0
         | _ ->
