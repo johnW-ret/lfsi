@@ -5,9 +5,6 @@ open System.IO
 open Lfsx.Core
 
 module Program =
-    let private defaultSource =
-        "(**\n# Hello lfsx\n*)\n\nlet greeting name = $\"hello, {name}\"\n\ngreeting \"notebook\"\n\n(** *)\n\ngreeting \"again\""
-
     let private cellLabel cell =
         match cell.Kind with
         | CellKind.Markdown -> "markdown"
@@ -20,19 +17,23 @@ module Program =
 
     [<EntryPoint>]
     let main argv =
-        let path = argv |> Array.tryHead
+        match argv |> Array.toList with
+        | "--html" :: file :: _ when File.Exists file ->
+            let html = LiterateScript.toHtml (Some file) (File.ReadAllText file)
+            printf "%s" html
+            0
+        | file :: _ when File.Exists file ->
+            let source = File.ReadAllText file
 
-        let source =
-            path
-            |> Option.filter File.Exists
-            |> Option.map File.ReadAllText
-            |> Option.defaultValue defaultSource
+            let parsed = LiterateScript.parse (Some file) source
 
-        let parsed = LiterateScript.parse path source
+            printfn "cells: %d" parsed.Document.Cells.Length
 
-        printfn "cells: %d" parsed.Document.Cells.Length
+            parsed.Document.Cells
+            |> List.iteri (fun index cell ->
+                printfn "%02d [%s] %s" (index + 1) (cellLabel cell) (firstLine cell.Source))
 
-        parsed.Document.Cells
-        |> List.iteri (fun index cell -> printfn "%02d [%s] %s" (index + 1) (cellLabel cell) (firstLine cell.Source))
-
-        0
+            0
+        | _ ->
+            eprintfn "Pass an .fsx file path."
+            1
