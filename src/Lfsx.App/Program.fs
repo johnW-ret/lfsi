@@ -356,11 +356,12 @@ module Program =
     [<EntryPoint>]
     let main argv =
         match argv |> Array.toList with
-        | "--html" :: file :: _ ->
+        | "--html" :: file :: _ when File.Exists file ->
             let html = LiterateScript.toHtml (Some file) (File.ReadAllText file)
             printf "%s" html
             0
         | file :: _ when File.Exists file ->
             (buildApp (Some file)).StartWithConsoleLifetime(argv)
         | _ ->
-            (buildApp None).StartWithConsoleLifetime(argv)
+            eprintfn "Pass an .fsx file path."
+            1
