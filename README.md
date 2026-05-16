@@ -20,14 +20,14 @@ FSharp.Formatting output commands such as `(*** include-value: name ***)` are no
 
 ```powershell
 $env:DOTNET_CLI_HOME="$PWD/.dotnet"
-dotnet run --project src/Lfsx.App -- examples/hello.fsx
+dotnet run --project src/Lfsx.App -- foo.fsx
 ```
 
 Export the FSharp.Formatting HTML for a script:
 
 ```powershell
 $env:DOTNET_CLI_HOME="$PWD/.dotnet"
-dotnet run --project src/Lfsx.App -- --html examples/hello.fsx
+dotnet run --project src/Lfsx.App -- --html foo.fsx
 ```
 
 ## Current Slice
