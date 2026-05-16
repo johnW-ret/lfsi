@@ -27,11 +27,11 @@ module Program =
 
             let parsed = LiterateScript.parse (Some file) source
 
-            printfn "cells: %d" parsed.Document.Cells.Length
+            eprintfn "cells: %d" parsed.Document.Cells.Length
 
             parsed.Document.Cells
             |> List.iteri (fun index cell ->
-                printfn "%02d [%s] %s" (index + 1) (cellLabel cell) (firstLine cell.Source))
+                eprintfn "%02d [%s] %s" (index + 1) (cellLabel cell) (firstLine cell.Source))
 
             0
         | _ ->
