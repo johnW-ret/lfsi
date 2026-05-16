@@ -4,105 +4,131 @@ open System
 open FSharp.Formatting.Literate
 
 type LiterateParseResult =
-    {
-        Document: NotebookDocument
-        FormattingDiagnostics: string list
-    }
+    { Document: NotebookDocument
+      FormattingDiagnostics: string list }
 
 module LiterateScript =
+    let private commandCommentMarker = '*'
+    let private notFoundIndex = -1
+
     let private normalizeNewlines (text: string) =
-        text.Replace("\r\n", "\n").Replace("\r", "\n")
+        text
+            .Replace(LiterateSyntax.windowsNewline, LiterateSyntax.unixNewline)
+            .Replace(LiterateSyntax.carriageReturn, LiterateSyntax.unixNewline)
 
     let private trimOneLeadingNewline (text: string) =
-        if text.StartsWith("\n", StringComparison.Ordinal) then text.Substring(1) else text
+        if text.StartsWith(LiterateSyntax.unixNewline, StringComparison.Ordinal) then
+            text.Substring(LiterateSyntax.unixNewline.Length)
+        else
+            text
 
     let private trimOneTrailingNewline (text: string) =
-        if text.EndsWith("\n", StringComparison.Ordinal) then text.Substring(0, text.Length - 1) else text
+        if text.EndsWith(LiterateSyntax.unixNewline, StringComparison.Ordinal) then
+            text.Substring(0, text.Length - LiterateSyntax.unixNewline.Length)
+        else
+            text
 
     let private block kind source =
         NotebookCell.create kind (source |> trimOneLeadingNewline |> trimOneTrailingNewline)
 
     let private isSingleLineEmptyMarkdownSeparator (source: string) startIndex endIndex =
-        let openTokenLength = 3
-        let body = source.Substring(startIndex + openTokenLength, endIndex - startIndex - openTokenLength)
-        not (body.Contains("\n", StringComparison.Ordinal)) && String.IsNullOrWhiteSpace body
+        let body =
+            source.Substring(
+                startIndex + LiterateSyntax.markdownOpenToken.Length,
+                endIndex - startIndex - LiterateSyntax.markdownOpenToken.Length
+            )
 
-    let private addCodeCell (buffer: Text.StringBuilder) =
-        if buffer.Length = 0 then
+        not (body.Contains(LiterateSyntax.unixNewline, StringComparison.Ordinal))
+        && String.IsNullOrWhiteSpace body
+
+    let private codeCell source =
+        let source = source |> trimOneTrailingNewline
+
+        if String.IsNullOrWhiteSpace source then
             None
         else
-            let source = buffer.ToString() |> trimOneTrailingNewline
-            buffer.Clear() |> ignore
+            Some(block CellKind.Code source)
 
-            if String.IsNullOrWhiteSpace source then
-                None
-            else
-                Some(block CellKind.Code source)
+    let private prependIfSome item items =
+        item |> Option.map (fun x -> x :: items) |> Option.defaultValue items
+
+    let private substring (source: string) startIndex endIndex =
+        source.Substring(startIndex, endIndex - startIndex)
 
     let private findToken (source: string) token start =
         let index = source.IndexOf(token, start, StringComparison.Ordinal)
-        if index < 0 then None else Some index
+        if index = notFoundIndex then None else Some index
 
     let private findMarkdownStart (source: string) start =
         let rec loop cursor =
-            let index = source.IndexOf("(**", cursor, StringComparison.Ordinal)
+            let index =
+                source.IndexOf(LiterateSyntax.markdownOpenToken, cursor, StringComparison.Ordinal)
 
-            if index < 0 then
+            if index = notFoundIndex then
                 None
-            elif index + 3 < source.Length && source.[index + 3] = '*' then
-                loop (index + 3)
+            elif
+                index + LiterateSyntax.markdownOpenToken.Length < source.Length
+                && source.[index + LiterateSyntax.markdownOpenToken.Length] = commandCommentMarker
+            then
+                loop (index + LiterateSyntax.markdownOpenToken.Length)
             else
                 Some index
 
         loop start
 
-    let parse (sourcePath: string option) (source: string) =
-        let source = normalizeNewlines source
-        let cells = ResizeArray<NotebookCell>()
-        let codeBuffer = Text.StringBuilder()
-        let mutable cursor = 0
-
-        while cursor < source.Length do
+    let private parseCells (source: string) =
+        let rec loop cursor cells =
             match findMarkdownStart source cursor with
             | None ->
-                codeBuffer.Append(source.Substring(cursor)) |> ignore
-                cursor <- source.Length
+                substring source cursor source.Length
+                |> codeCell
+                |> fun cell -> prependIfSome cell cells
+                |> List.rev
             | Some startIndex ->
-                if startIndex > cursor then
-                    codeBuffer.Append(source.Substring(cursor, startIndex - cursor)) |> ignore
+                let cells =
+                    substring source cursor startIndex
+                    |> codeCell
+                    |> fun cell -> prependIfSome cell cells
 
-                addCodeCell codeBuffer
-                |> Option.iter cells.Add
-
-                match findToken source "*)" (startIndex + 3) with
+                match
+                    findToken
+                        source
+                        LiterateSyntax.markdownCloseToken
+                        (startIndex + LiterateSyntax.markdownOpenToken.Length)
+                with
                 | None ->
-                    codeBuffer.Append(source.Substring(startIndex)) |> ignore
-                    cursor <- source.Length
+                    substring source startIndex source.Length
+                    |> codeCell
+                    |> fun cell -> prependIfSome cell cells
+                    |> List.rev
                 | Some endIndex ->
-                    let bodyStart = startIndex + 3
-                    let body = source.Substring(bodyStart, endIndex - bodyStart)
+                    let body =
+                        substring source (startIndex + LiterateSyntax.markdownOpenToken.Length) endIndex
 
-                    if not (isSingleLineEmptyMarkdownSeparator source startIndex endIndex) then
-                        cells.Add(block CellKind.Markdown body)
+                    let cells =
+                        if isSingleLineEmptyMarkdownSeparator source startIndex endIndex then
+                            cells
+                        else
+                            block CellKind.Markdown body :: cells
 
-                    cursor <- endIndex + 2
+                    loop (endIndex + LiterateSyntax.markdownCloseToken.Length) cells
 
-        addCodeCell codeBuffer
-        |> Option.iter cells.Add
+        loop 0 []
 
-        {
-            Document = { SourcePath = sourcePath; Cells = cells |> Seq.toList }
-            FormattingDiagnostics =
-                try
-                    let parsed: LiterateDocument =
-                        Literate.ParseScriptString(source, ?path = sourcePath)
+    let parse (sourcePath: string option) (source: string) =
+        let source = normalizeNewlines source
 
-                    parsed.Diagnostics
-                    |> Seq.map string
-                    |> Seq.toList
-                with ex ->
-                    [ ex.Message ]
-        }
+        { Document =
+            { SourcePath = sourcePath
+              Cells = parseCells source }
+          FormattingDiagnostics =
+            try
+                let parsed: LiterateDocument =
+                    Literate.ParseScriptString(source, ?path = sourcePath)
+
+                parsed.Diagnostics |> Seq.map string |> Seq.toList
+            with ex ->
+                [ ex.Message ] }
 
     let toHtml (sourcePath: string option) (source: string) =
         let parsed = Literate.ParseScriptString(source, ?path = sourcePath)

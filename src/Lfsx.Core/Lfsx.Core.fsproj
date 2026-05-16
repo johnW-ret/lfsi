@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
@@ -6,6 +6,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="LiterateSyntax.fs" />
     <Compile Include="Notebook.fs" />
     <Compile Include="LiterateScript.fs" />
     <Compile Include="Outputs.fs" />

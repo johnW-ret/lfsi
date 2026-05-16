@@ -12,40 +12,38 @@ type NotebookOutput =
     | Error of string
 
 type NotebookCell =
-    {
-        Id: Guid
-        Kind: CellKind
-        Source: string
-        Outputs: NotebookOutput list
-    }
+    { Id: Guid
+      Kind: CellKind
+      Source: string
+      Outputs: NotebookOutput list }
 
 module NotebookCell =
     let create kind source =
-        {
-            Id = Guid.NewGuid()
-            Kind = kind
-            Source = source
-            Outputs = []
-        }
+        { Id = Guid.NewGuid()
+          Kind = kind
+          Source = source
+          Outputs = [] }
 
     let withOutput output cell =
         { cell with Outputs = cell.Outputs @ [ output ] }
 
+
 type NotebookDocument =
-    {
-        SourcePath: string option
-        Cells: NotebookCell list
-    }
+    { SourcePath: string option
+      Cells: NotebookCell list }
 
 module NotebookDocument =
     let empty = { SourcePath = None; Cells = [] }
 
     let private cellSource cell =
         match cell.Kind with
-        | CellKind.Markdown ->
-            "(**\n" + cell.Source.TrimEnd() + "\n*)"
-        | CellKind.Code ->
-            cell.Source.TrimEnd()
+        | Markdown ->
+            LiterateSyntax.markdownOpenToken
+            + LiterateSyntax.unixNewline
+            + cell.Source.TrimEnd()
+            + LiterateSyntax.unixNewline
+            + LiterateSyntax.markdownCloseToken
+        | Code -> cell.Source.TrimEnd()
 
     let source doc =
         doc.Cells
@@ -53,8 +51,11 @@ module NotebookDocument =
             (fun (previousKind, parts) cell ->
                 let separator =
                     match previousKind, cell.Kind with
-                    | Some CellKind.Code, CellKind.Code -> "\n\n(** *)\n\n"
-                    | _ -> "\n\n"
+                    | Some Code, Code ->
+                        LiterateSyntax.cellSpacing
+                        + LiterateSyntax.codeCellSeparator
+                        + LiterateSyntax.cellSpacing
+                    | _ -> LiterateSyntax.cellSpacing
 
                 let next =
                     match parts with
