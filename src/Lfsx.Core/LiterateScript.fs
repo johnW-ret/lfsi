@@ -129,3 +129,8 @@ module LiterateScript =
                 parsed.Diagnostics |> Seq.map string |> Seq.toList
             with ex ->
                 [ ex.Message ] }
+
+    let toHtml (sourcePath: string option) (source: string) =
+        let parsed = Literate.ParseScriptString(source, ?path = sourcePath)
+
+        Literate.ToHtml(parsed, prefix = "", lineNumbers = false, generateAnchors = false)
