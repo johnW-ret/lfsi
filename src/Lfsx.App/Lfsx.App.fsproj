@@ -13,4 +13,8 @@
     <ProjectReference Include="..\Lfsx.Core\Lfsx.Core.fsproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <PackageReference Include="Consolonia" Version="11.3.9" />
+  </ItemGroup>
+
 </Project>
