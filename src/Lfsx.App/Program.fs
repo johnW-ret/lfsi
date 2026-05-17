@@ -38,6 +38,13 @@ type QuitConfirmation =
     | Arming
     | Armed
 
+type NotebookTheme =
+    { Dark: SolidColorBrush
+      Panel: SolidColorBrush
+      Text: SolidColorBrush
+      Muted: SolidColorBrush
+      Accent: SolidColorBrush }
+
 type NotebookViewModel(path: string option) =
     let source =
         path
@@ -89,12 +96,14 @@ type NotebookWindow(path: string option) as this =
     let quitConfirmationMessage = "Press Ctrl+C again to quit, or Esc to cancel."
     let mutable quitConfirmation = Hidden
 
-    let dark = SolidColorBrush(Color.FromRgb(18uy, 18uy, 18uy))
-    let panel = SolidColorBrush(Color.FromRgb(28uy, 30uy, 34uy))
+    let theme =
+        { Dark = SolidColorBrush(Color.FromRgb(18uy, 18uy, 18uy))
+          Panel = SolidColorBrush(Color.FromRgb(28uy, 30uy, 34uy))
+          Text = SolidColorBrush(Color.FromRgb(232uy, 232uy, 232uy))
+          Muted = SolidColorBrush(Color.FromRgb(170uy, 176uy, 184uy))
+          Accent = SolidColorBrush(Color.FromRgb(140uy, 190uy, 255uy)) }
+
     let selected = SolidColorBrush(Color.FromRgb(38uy, 72uy, 118uy))
-    let text = SolidColorBrush(Color.FromRgb(232uy, 232uy, 232uy))
-    let muted = SolidColorBrush(Color.FromRgb(170uy, 176uy, 184uy))
-    let accent = SolidColorBrush(Color.FromRgb(140uy, 190uy, 255uy))
     let error = SolidColorBrush(Color.FromRgb(255uy, 150uy, 150uy))
 
     let cellKindLabel kind =
@@ -183,7 +192,7 @@ type NotebookWindow(path: string option) as this =
 
             let container =
                 Border(
-                    Background = (if isSelected then selected else panel),
+                    Background = (if isSelected then selected else theme.Panel),
                     Padding = Thickness(1.0),
                     Margin = Thickness(0.0, 0.0, 0.0, 1.0))
 
@@ -192,7 +201,7 @@ type NotebookWindow(path: string option) as this =
             let title =
                 TextBlock(
                     Text = sprintf "[%02d] %s" (index + 1) (cellKindLabel cell.Kind),
-                    Foreground = (if isSelected then accent else muted))
+                    Foreground = (if isSelected then theme.Accent else theme.Muted))
 
             body.Children.Add(title) |> ignore
 
@@ -202,8 +211,8 @@ type NotebookWindow(path: string option) as this =
                         Text = cell.Source,
                         AcceptsReturn = true,
                         TextWrapping = TextWrapping.NoWrap,
-                        Foreground = text,
-                        Background = dark,
+                        Foreground = theme.Text,
+                        Background = theme.Dark,
                         MinHeight = 3.0)
 
                 editor.TextChanged.Add(fun _ ->
@@ -235,7 +244,7 @@ type NotebookWindow(path: string option) as this =
                 let preview =
                     TextBlock(
                         Text = cell.Source.TrimEnd(),
-                        Foreground = text,
+                        Foreground = theme.Text,
                         TextWrapping = TextWrapping.NoWrap)
 
                 body.Children.Add(preview) |> ignore
@@ -247,7 +256,7 @@ type NotebookWindow(path: string option) as this =
                     |> String.concat "\n\n"
 
                 let outputBrush =
-                    if cell.Outputs |> List.exists (function NotebookOutput.Error _ -> true | _ -> false) then error else muted
+                    if cell.Outputs |> List.exists (function NotebookOutput.Error _ -> true | _ -> false) then error else theme.Muted
 
                 body.Children.Add(
                     TextBlock(
@@ -320,17 +329,17 @@ type NotebookWindow(path: string option) as this =
 
     do
         this.RequestedThemeVariant <- Styling.ThemeVariant.Dark
-        this.Background <- dark
+        this.Background <- theme.Dark
 
-        header.Foreground <- accent
-        header.Background <- dark
+        header.Foreground <- theme.Accent
+        header.Background <- theme.Dark
         header.TextWrapping <- TextWrapping.Wrap
-        status.Foreground <- muted
-        status.Background <- dark
+        status.Foreground <- theme.Muted
+        status.Background <- theme.Dark
         status.TextWrapping <- TextWrapping.Wrap
 
         scroll.Content <- cellStack
-        scroll.Background <- dark
+        scroll.Background <- theme.Dark
         scroll.Focusable <- false
 
         DockPanel.SetDock(header, Dock.Top)
@@ -338,7 +347,7 @@ type NotebookWindow(path: string option) as this =
         root.Children.Add(header) |> ignore
         root.Children.Add(status) |> ignore
         root.Children.Add(scroll) |> ignore
-        root.Background <- dark
+        root.Background <- theme.Dark
 
         this.Content <- root
 
