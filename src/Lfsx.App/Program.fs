@@ -57,6 +57,27 @@ type NotebookWindow(path: string) as this =
         | CellKind.Markdown -> "markdown"
         | CellKind.Code -> "fsx"
 
+    let addCellPreview (cellStack: StackPanel) index cell panel text accent =
+        let body = StackPanel(Orientation = Orientation.Vertical, Spacing = 1.0)
+
+        body.Children.Add(
+            TextBlock(
+                Text = sprintf "[%02d] %s" (index + 1) (cellKindLabel cell.Kind),
+                Foreground = accent)) |> ignore
+
+        body.Children.Add(
+            TextBlock(
+                Text = cell.Source.TrimEnd(),
+                Foreground = text,
+                TextWrapping = TextWrapping.NoWrap)) |> ignore
+
+        cellStack.Children.Add(
+            Border(
+                Background = panel,
+                Padding = Thickness(1.0),
+                Margin = Thickness(0.0, 0.0, 0.0, 1.0),
+                Child = body)) |> ignore
+
     do
         let dark = SolidColorBrush(Color.FromRgb(18uy, 18uy, 18uy))
         let panel = SolidColorBrush(Color.FromRgb(28uy, 30uy, 34uy))
@@ -83,26 +104,7 @@ type NotebookWindow(path: string) as this =
         let cellStack = StackPanel(Orientation = Orientation.Vertical, Spacing = 1.0)
 
         parsed.Document.Cells
-        |> List.iteri (fun index cell ->
-            let body = StackPanel(Orientation = Orientation.Vertical, Spacing = 1.0)
-
-            body.Children.Add(
-                TextBlock(
-                    Text = sprintf "[%02d] %s" (index + 1) (cellKindLabel cell.Kind),
-                    Foreground = accent)) |> ignore
-
-            body.Children.Add(
-                TextBlock(
-                    Text = cell.Source.TrimEnd(),
-                    Foreground = text,
-                    TextWrapping = TextWrapping.NoWrap)) |> ignore
-
-            cellStack.Children.Add(
-                Border(
-                    Background = panel,
-                    Padding = Thickness(1.0),
-                    Margin = Thickness(0.0, 0.0, 0.0, 1.0),
-                    Child = body)) |> ignore)
+        |> List.iteri (fun index cell -> addCellPreview cellStack index cell panel text accent)
 
         let scroll = ScrollViewer(Content = cellStack, Background = dark)
 
