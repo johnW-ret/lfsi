@@ -104,10 +104,31 @@ type NotebookWindow(path: string) as this =
         let status =
             TextBlock(Text = formattingStatus(), Foreground = theme.Muted, Background = theme.Dark, TextWrapping = TextWrapping.Wrap)
 
-        let closeWindow () =
+        let setStatus message =
+            status.Text <- message
+
+        let quit () =
             match Application.Current.ApplicationLifetime with
             | :? IControlledApplicationLifetime as lifetime -> lifetime.Shutdown()
             | _ -> this.Close()
+
+        let requestQuit () =
+            match quitConfirmation with
+            | Hidden ->
+                quitConfirmation <- Arming
+                setStatus quitConfirmationMessage
+
+                Task.Delay(1).ContinueWith(fun _ ->
+                    if quitConfirmation = Arming then
+                        quitConfirmation <- Armed) |> ignore
+            | Arming ->
+                setStatus quitConfirmationMessage
+            | Armed ->
+                quit()
+
+        let cancelQuitConfirmation () =
+            quitConfirmation <- Hidden
+            restoreStatus status
 
         let cellStack = StackPanel(Orientation = Orientation.Vertical, Spacing = 1.0)
 
@@ -129,24 +150,10 @@ type NotebookWindow(path: string) as this =
         this.AddHandler(InputElement.KeyDownEvent, (fun _ args ->
             if args.KeyModifiers = KeyModifiers.Control && args.Key = Key.C then
                 args.Handled <- true
-
-                match quitConfirmation with
-                | Hidden ->
-                    quitConfirmation <- Arming
-                    status.Text <- quitConfirmationMessage
-
-                    Task.Delay(1).ContinueWith(fun _ ->
-                        if quitConfirmation = Arming then
-                            quitConfirmation <- Armed) |> ignore
-                | Arming ->
-                    status.Text <- quitConfirmationMessage
-                | Armed ->
-                    closeWindow()
+                requestQuit()
             elif args.Key = Key.Escape && quitConfirmation <> Hidden then
                 args.Handled <- true
-                quitConfirmation <- Hidden
-
-                restoreStatus status),
+                cancelQuitConfirmation()),
             RoutingStrategies.Tunnel,
             true)
 
