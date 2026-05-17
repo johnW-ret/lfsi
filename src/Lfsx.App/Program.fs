@@ -135,7 +135,7 @@ type NotebookWindow(path: string) as this =
         parsed.Document.Cells
         |> List.iteri (addCellPreview theme cellStack)
 
-        let scroll = ScrollViewer(Content = cellStack, Background = theme.Dark)
+        let scroll = ScrollViewer(Content = cellStack, Background = theme.Dark, Focusable = false)
 
         DockPanel.SetDock(header, Dock.Top)
         DockPanel.SetDock(status, Dock.Bottom)
