@@ -227,28 +227,7 @@ type NotebookWindow(path: string option) as this =
                             suppressEditorChange <- false
                             moveSelection -1)
 
-                editor.KeyDown.Add(fun args ->
-                    if args.KeyModifiers.HasFlag KeyModifiers.Control && args.Key = Key.R then
-                        args.Handled <- true
-                        runSelectedAsync() |> ignore
-                    elif args.KeyModifiers.HasFlag KeyModifiers.Control && args.Key = Key.S then
-                        args.Handled <- true
-                        saveFile()
-                    elif args.KeyModifiers.HasFlag KeyModifiers.Control && args.Key = Key.N then
-                        args.Handled <- true
-                        moveSelection 1
-                    elif args.KeyModifiers.HasFlag KeyModifiers.Control && args.Key = Key.P then
-                        args.Handled <- true
-                        moveSelection -1
-                    elif args.KeyModifiers.HasFlag KeyModifiers.Alt && args.Key = Key.Down then
-                        args.Handled <- true
-                        moveSelection 1
-                    elif args.KeyModifiers.HasFlag KeyModifiers.Alt && args.Key = Key.Up then
-                        args.Handled <- true
-                        moveSelection -1
-                    elif args.Key = Key.Tab then
-                        args.Handled <- true
-                        moveSelection(if args.KeyModifiers.HasFlag KeyModifiers.Shift then -1 else 1))
+                editor.KeyDown.Add(handleNotebookKey)
 
                 selectedEditor <- Some editor
                 body.Children.Add(editor) |> ignore
@@ -316,6 +295,29 @@ type NotebookWindow(path: string option) as this =
                     rebuildCells())
         }
 
+    and handleNotebookKey (args: KeyEventArgs) =
+        if args.KeyModifiers.HasFlag KeyModifiers.Control && args.Key = Key.R then
+            args.Handled <- true
+            runSelectedAsync() |> ignore
+        elif args.KeyModifiers.HasFlag KeyModifiers.Control && args.Key = Key.S then
+            args.Handled <- true
+            saveFile()
+        elif args.KeyModifiers.HasFlag KeyModifiers.Control && args.Key = Key.N then
+            args.Handled <- true
+            moveSelection 1
+        elif args.KeyModifiers.HasFlag KeyModifiers.Control && args.Key = Key.P then
+            args.Handled <- true
+            moveSelection -1
+        elif args.KeyModifiers.HasFlag KeyModifiers.Alt && args.Key = Key.Down then
+            args.Handled <- true
+            moveSelection 1
+        elif args.KeyModifiers.HasFlag KeyModifiers.Alt && args.Key = Key.Up then
+            args.Handled <- true
+            moveSelection -1
+        elif args.Key = Key.Tab then
+            args.Handled <- true
+            moveSelection(if args.KeyModifiers.HasFlag KeyModifiers.Shift then -1 else 1)
+
     do
         this.RequestedThemeVariant <- Styling.ThemeVariant.Dark
         this.Background <- dark
@@ -340,28 +342,7 @@ type NotebookWindow(path: string option) as this =
 
         this.Content <- root
 
-        this.KeyDown.Add(fun args ->
-            if args.KeyModifiers.HasFlag KeyModifiers.Control && args.Key = Key.R then
-                args.Handled <- true
-                runSelectedAsync() |> ignore
-            elif args.KeyModifiers.HasFlag KeyModifiers.Control && args.Key = Key.S then
-                args.Handled <- true
-                saveFile()
-            elif args.KeyModifiers.HasFlag KeyModifiers.Control && args.Key = Key.N then
-                args.Handled <- true
-                moveSelection 1
-            elif args.KeyModifiers.HasFlag KeyModifiers.Control && args.Key = Key.P then
-                args.Handled <- true
-                moveSelection -1
-            elif args.KeyModifiers.HasFlag KeyModifiers.Alt && args.Key = Key.Down then
-                args.Handled <- true
-                moveSelection 1
-            elif args.KeyModifiers.HasFlag KeyModifiers.Alt && args.Key = Key.Up then
-                args.Handled <- true
-                moveSelection -1
-            elif args.Key = Key.Tab then
-                args.Handled <- true
-                moveSelection(if args.KeyModifiers.HasFlag KeyModifiers.Shift then -1 else 1))
+        this.KeyDown.Add(handleNotebookKey)
 
         this.AddHandler(InputElement.KeyDownEvent, (fun _ args ->
             if args.KeyModifiers = KeyModifiers.Control && args.Key = Key.C then
