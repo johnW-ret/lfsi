@@ -36,6 +36,13 @@ type QuitConfirmation =
     | Arming
     | Armed
 
+type NotebookTheme =
+    { Dark: SolidColorBrush
+      Panel: SolidColorBrush
+      Text: SolidColorBrush
+      Muted: SolidColorBrush
+      Accent: SolidColorBrush }
+
 type NotebookWindow(path: string) as this =
     inherit Window(Title = "lfsx notebook", WindowState = WindowState.Maximized)
 
@@ -57,44 +64,45 @@ type NotebookWindow(path: string) as this =
         | CellKind.Markdown -> "markdown"
         | CellKind.Code -> "fsx"
 
-    let addCellPreview (cellStack: StackPanel) index cell panel text accent =
+    let addCellPreview theme (cellStack: StackPanel) index cell =
         let body = StackPanel(Orientation = Orientation.Vertical, Spacing = 1.0)
 
         body.Children.Add(
             TextBlock(
                 Text = sprintf "[%02d] %s" (index + 1) (cellKindLabel cell.Kind),
-                Foreground = accent)) |> ignore
+                Foreground = theme.Accent)) |> ignore
 
         body.Children.Add(
             TextBlock(
                 Text = cell.Source.TrimEnd(),
-                Foreground = text,
+                Foreground = theme.Text,
                 TextWrapping = TextWrapping.NoWrap)) |> ignore
 
         cellStack.Children.Add(
             Border(
-                Background = panel,
+                Background = theme.Panel,
                 Padding = Thickness(1.0),
                 Margin = Thickness(0.0, 0.0, 0.0, 1.0),
                 Child = body)) |> ignore
 
     do
-        let dark = SolidColorBrush(Color.FromRgb(18uy, 18uy, 18uy))
-        let panel = SolidColorBrush(Color.FromRgb(28uy, 30uy, 34uy))
-        let text = SolidColorBrush(Color.FromRgb(232uy, 232uy, 232uy))
-        let muted = SolidColorBrush(Color.FromRgb(170uy, 176uy, 184uy))
-        let accent = SolidColorBrush(Color.FromRgb(140uy, 190uy, 255uy))
+        let theme =
+            { Dark = SolidColorBrush(Color.FromRgb(18uy, 18uy, 18uy))
+              Panel = SolidColorBrush(Color.FromRgb(28uy, 30uy, 34uy))
+              Text = SolidColorBrush(Color.FromRgb(232uy, 232uy, 232uy))
+              Muted = SolidColorBrush(Color.FromRgb(170uy, 176uy, 184uy))
+              Accent = SolidColorBrush(Color.FromRgb(140uy, 190uy, 255uy)) }
 
-        let root = DockPanel(Background = dark)
+        let root = DockPanel(Background = theme.Dark)
         let header =
             TextBlock(
                 Text = sprintf "lfsx  %d cells  Ctrl+C quit" parsed.Document.Cells.Length,
-                Foreground = accent,
-                Background = dark,
+                Foreground = theme.Accent,
+                Background = theme.Dark,
                 TextWrapping = TextWrapping.Wrap)
 
         let status =
-            TextBlock(Text = formattingStatus(), Foreground = muted, Background = dark, TextWrapping = TextWrapping.Wrap)
+            TextBlock(Text = formattingStatus(), Foreground = theme.Muted, Background = theme.Dark, TextWrapping = TextWrapping.Wrap)
 
         let closeWindow () =
             match Application.Current.ApplicationLifetime with
@@ -104,9 +112,9 @@ type NotebookWindow(path: string) as this =
         let cellStack = StackPanel(Orientation = Orientation.Vertical, Spacing = 1.0)
 
         parsed.Document.Cells
-        |> List.iteri (fun index cell -> addCellPreview cellStack index cell panel text accent)
+        |> List.iteri (addCellPreview theme cellStack)
 
-        let scroll = ScrollViewer(Content = cellStack, Background = dark)
+        let scroll = ScrollViewer(Content = cellStack, Background = theme.Dark)
 
         DockPanel.SetDock(header, Dock.Top)
         DockPanel.SetDock(status, Dock.Bottom)
@@ -115,7 +123,7 @@ type NotebookWindow(path: string) as this =
         root.Children.Add(scroll) |> ignore
 
         base.RequestedThemeVariant <- Styling.ThemeVariant.Dark
-        base.Background <- dark
+        base.Background <- theme.Dark
         base.Content <- root
 
         this.AddHandler(InputElement.KeyDownEvent, (fun _ args ->
