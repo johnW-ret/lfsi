@@ -2,17 +2,41 @@ namespace Lfsx.App
 
 open System
 open System.IO
+open System.Runtime.InteropServices
 open System.Threading
+open System.Threading.Tasks
 open Avalonia
 open Avalonia.Controls
 open Avalonia.Controls.ApplicationLifetimes
 open Avalonia.Input
+open Avalonia.Interactivity
 open Avalonia.Layout
 open Avalonia.Media
 open Avalonia.Threading
 open Consolonia
 open Consolonia.Themes
 open Lfsx.Core
+
+module NativeEnvironment =
+    [<Literal>]
+    let EscDelayName = "ESCDELAY"
+
+    [<Literal>]
+    let DefaultEscDelay = "1"
+
+    [<DllImport("libc")>]
+    extern int setenv(string name, string value, int overwrite)
+
+    // .NET environment mutation is not visible to native getenv on Unix.
+    let setIfMissing name value =
+        if not (OperatingSystem.IsWindows())
+           && (Environment.GetEnvironmentVariable(name) |> String.IsNullOrWhiteSpace) then
+            setenv(name, value, 1) |> ignore
+
+type QuitConfirmation =
+    | Hidden
+    | Arming
+    | Armed
 
 type NotebookViewModel(path: string option) =
     let source =
@@ -49,7 +73,7 @@ type NotebookViewModel(path: string option) =
             this.SelectedIndex <- Math.Clamp(this.SelectedIndex + delta, 0, last)
 
 type NotebookWindow(path: string option) as this =
-    inherit Window(Title = "lfsx notebook", Width = 110.0, Height = 38.0)
+    inherit Window(Title = "lfsx notebook", WindowState = WindowState.Maximized)
 
     let viewModel = NotebookViewModel(path)
     let fsi = new FsiSession(path |> Option.map Path.GetDirectoryName |> Option.defaultValue Environment.CurrentDirectory)
@@ -62,6 +86,8 @@ type NotebookWindow(path: string option) as this =
     let mutable selectedEditor: TextBox option = None
     let mutable running = false
     let mutable suppressEditorChange = false
+    let quitConfirmationMessage = "Press Ctrl+C again to quit, or Esc to cancel."
+    let mutable quitConfirmation = Hidden
 
     let dark = SolidColorBrush(Color.FromRgb(18uy, 18uy, 18uy))
     let panel = SolidColorBrush(Color.FromRgb(28uy, 30uy, 34uy))
@@ -85,10 +111,38 @@ type NotebookWindow(path: string option) as this =
     let setStatus message =
         status.Text <- message
 
+    let formattingStatus () =
+        if viewModel.Diagnostics.IsEmpty then
+            "FSharp.Formatting parse: ok"
+        else
+            "FSharp.Formatting parse: " + String.concat "; " viewModel.Diagnostics
+
+    let restoreStatus () =
+        status.Text <- formattingStatus()
+
     let quit () =
         match Application.Current.ApplicationLifetime with
         | :? IControlledApplicationLifetime as lifetime -> lifetime.Shutdown()
         | _ -> this.Close()
+
+    let requestQuit () =
+        match quitConfirmation with
+        | Hidden ->
+            quitConfirmation <- Arming
+            setStatus quitConfirmationMessage
+
+            Task.Delay(1).ContinueWith(fun _ ->
+                if quitConfirmation = Arming then
+                    quitConfirmation <- Armed) |> ignore
+        | Arming ->
+            setStatus quitConfirmationMessage
+        | Armed ->
+            quit()
+
+    let cancelQuitConfirmation () =
+        if quitConfirmation <> Hidden then
+            quitConfirmation <- Hidden
+            restoreStatus()
 
     let saveSelectedText () =
         selectedEditor
@@ -180,9 +234,6 @@ type NotebookWindow(path: string option) as this =
                     elif args.KeyModifiers.HasFlag KeyModifiers.Control && args.Key = Key.S then
                         args.Handled <- true
                         saveFile()
-                    elif args.KeyModifiers.HasFlag KeyModifiers.Control && args.Key = Key.Q then
-                        args.Handled <- true
-                        quit()
                     elif args.KeyModifiers.HasFlag KeyModifiers.Control && args.Key = Key.N then
                         args.Handled <- true
                         moveSelection 1
@@ -228,19 +279,13 @@ type NotebookWindow(path: string option) as this =
             container.Child <- body
             cellStack.Children.Add(container) |> ignore)
 
-        let diagnostics =
-            if viewModel.Diagnostics.IsEmpty then
-                "FSharp.Formatting parse: ok"
-            else
-                "FSharp.Formatting parse: " + String.concat "; " viewModel.Diagnostics
-
         header.Text <-
-            sprintf "lfsx  cell %d/%d  Ctrl+R run  Ctrl+S save  Ctrl+Q quit  Alt+Up/Down or Ctrl+P/N move  Tab/Shift+Tab move"
+            sprintf "lfsx  cell %d/%d  Ctrl+R run  Ctrl+S save  Ctrl+C quit  Alt+Up/Down or Ctrl+P/N move  Tab/Shift+Tab move"
                 (viewModel.SelectedIndex + 1)
                 viewModel.Cells.Length
 
         if String.IsNullOrWhiteSpace status.Text then
-            status.Text <- diagnostics
+            restoreStatus()
 
         focusEditor()
 
@@ -302,9 +347,6 @@ type NotebookWindow(path: string option) as this =
             elif args.KeyModifiers.HasFlag KeyModifiers.Control && args.Key = Key.S then
                 args.Handled <- true
                 saveFile()
-            elif args.KeyModifiers.HasFlag KeyModifiers.Control && args.Key = Key.Q then
-                args.Handled <- true
-                quit()
             elif args.KeyModifiers.HasFlag KeyModifiers.Control && args.Key = Key.N then
                 args.Handled <- true
                 moveSelection 1
@@ -320,6 +362,16 @@ type NotebookWindow(path: string option) as this =
             elif args.Key = Key.Tab then
                 args.Handled <- true
                 moveSelection(if args.KeyModifiers.HasFlag KeyModifiers.Shift then -1 else 1))
+
+        this.AddHandler(InputElement.KeyDownEvent, (fun _ args ->
+            if args.KeyModifiers = KeyModifiers.Control && args.Key = Key.C then
+                args.Handled <- true
+                requestQuit()
+            elif args.Key = Key.Escape && quitConfirmation <> Hidden then
+                args.Handled <- true
+                cancelQuitConfirmation()),
+            RoutingStrategies.Tunnel,
+            true)
 
         rebuildCells()
 
@@ -346,7 +398,12 @@ type App(path: string option) =
         base.OnFrameworkInitializationCompleted()
 
 module Program =
+    let private configureTerminalEnvironment () =
+        NativeEnvironment.setIfMissing NativeEnvironment.EscDelayName NativeEnvironment.DefaultEscDelay
+
     let private buildApp path =
+        configureTerminalEnvironment()
+
         AppBuilder
             .Configure(fun () -> App(path))
             .UseConsolonia()
