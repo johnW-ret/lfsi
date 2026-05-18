@@ -49,6 +49,7 @@ type NotebookWindow(path: string) as this =
     let parsed = LiterateScript.parse (Some path) (File.ReadAllText path)
     let quitConfirmationMessage = "Press Ctrl+C again to quit, or Esc to cancel."
     let mutable quitConfirmation = Hidden
+    let mutable selectedIndex = 0
 
     let formattingStatus () =
         if parsed.FormattingDiagnostics.IsEmpty then
@@ -64,13 +65,14 @@ type NotebookWindow(path: string) as this =
         | CellKind.Markdown -> "markdown"
         | CellKind.Code -> "fsx"
 
-    let addCellPreview theme (cellStack: StackPanel) index cell =
+    let addCellPreview theme selectedBrush selectedIndex (cellStack: StackPanel) index cell =
+        let isSelected = index = selectedIndex
         let body = StackPanel(Orientation = Orientation.Vertical, Spacing = 1.0)
 
         body.Children.Add(
             TextBlock(
                 Text = sprintf "[%02d] %s" (index + 1) (cellKindLabel cell.Kind),
-                Foreground = theme.Accent)) |> ignore
+                Foreground = (if isSelected then theme.Accent else theme.Muted))) |> ignore
 
         body.Children.Add(
             TextBlock(
@@ -80,7 +82,7 @@ type NotebookWindow(path: string) as this =
 
         cellStack.Children.Add(
             Border(
-                Background = theme.Panel,
+                Background = (if isSelected then selectedBrush else theme.Panel),
                 Padding = Thickness(1.0),
                 Margin = Thickness(0.0, 0.0, 0.0, 1.0),
                 Child = body)) |> ignore
@@ -93,10 +95,11 @@ type NotebookWindow(path: string) as this =
               Muted = SolidColorBrush(Color.FromRgb(170uy, 176uy, 184uy))
               Accent = SolidColorBrush(Color.FromRgb(140uy, 190uy, 255uy)) }
 
+        let selectedBrush = SolidColorBrush(Color.FromRgb(38uy, 72uy, 118uy))
+        let cells = parsed.Document.Cells
         let root = DockPanel(Background = theme.Dark)
         let header =
             TextBlock(
-                Text = sprintf "lfsx  %d cells  Ctrl+C quit" parsed.Document.Cells.Length,
                 Foreground = theme.Accent,
                 Background = theme.Dark,
                 TextWrapping = TextWrapping.Wrap)
@@ -132,8 +135,31 @@ type NotebookWindow(path: string) as this =
 
         let cellStack = StackPanel(Orientation = Orientation.Vertical, Spacing = 1.0)
 
-        parsed.Document.Cells
-        |> List.iteri (addCellPreview theme cellStack)
+        let updateHeader () =
+            if cells.IsEmpty then
+                header.Text <- "lfsx  no cells  Ctrl+C quit"
+            else
+                header.Text <-
+                    sprintf "lfsx  cell %d/%d  Up/Down move  Ctrl+C quit"
+                        (selectedIndex + 1)
+                        cells.Length
+
+        let rebuildCells () =
+            cellStack.Children.Clear()
+
+            cells
+            |> List.iteri (addCellPreview theme selectedBrush selectedIndex cellStack)
+
+            updateHeader()
+
+        let moveSelection delta =
+            if not cells.IsEmpty then
+                let last = cells.Length - 1
+                let next = Math.Clamp(selectedIndex + delta, 0, last)
+
+                if next <> selectedIndex then
+                    selectedIndex <- next
+                    rebuildCells()
 
         let scroll = ScrollViewer(Content = cellStack, Background = theme.Dark, Focusable = false)
 
@@ -147,10 +173,18 @@ type NotebookWindow(path: string) as this =
         base.Background <- theme.Dark
         base.Content <- root
 
+        rebuildCells()
+
         this.AddHandler(InputElement.KeyDownEvent, (fun _ args ->
             if args.KeyModifiers = KeyModifiers.Control && args.Key = Key.C then
                 args.Handled <- true
                 requestQuit()
+            elif args.Key = Key.Down then
+                args.Handled <- true
+                moveSelection 1
+            elif args.Key = Key.Up then
+                args.Handled <- true
+                moveSelection -1
             elif args.Key = Key.Escape && quitConfirmation <> Hidden then
                 args.Handled <- true
                 cancelQuitConfirmation()),
