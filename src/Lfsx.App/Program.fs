@@ -44,15 +44,34 @@ type NotebookTheme =
       Muted: SolidColorBrush
       Accent: SolidColorBrush }
 
+type DirtyIndicator =
+    | HideDirtyIndicator
+    | StarWhenDirty
+
+type NotebookHeaderOptions =
+    { DirtyIndicator: DirtyIndicator }
+
+module NotebookHeader =
+    let dirtyIndicatorText options isDirty =
+        match options.DirtyIndicator with
+        | HideDirtyIndicator -> ""
+        | StarWhenDirty when isDirty -> "*"
+        | StarWhenDirty -> ""
+
 type NotebookWindow(path: string) as this =
     inherit Window(Title = "lfsx notebook", WindowState = WindowState.Maximized)
 
-    let parsed = LiterateScript.parse (Some path) (File.ReadAllText path)
+    let initialParsed, initialWriteTimeUtc = FilePersistence.load path
+    let persistenceMode = AutoReloadWhenClean
     let quitConfirmationMessage = "Press Ctrl+C again to quit, or Esc to cancel."
+    let mutable parsed = initialParsed
+    let mutable lastWriteTimeUtc = initialWriteTimeUtc
     let mutable quitConfirmation = Hidden
     let mutable selectedIndex = 0
     let mutable cells = parsed.Document.Cells
+    let mutable isDirty = false
     let mutable isEditing = false
+    let mutable hasExternalChanges = false
     let mutable selectedEditor: TextBox option = None
 
     let formattingStatus () =
@@ -91,7 +110,7 @@ type NotebookWindow(path: string) as this =
                 Margin = Thickness(0.0, 0.0, 0.0, 1.0),
                 Child = body)) |> ignore
 
-    let addEditableCell theme selectedBrush (cellStack: StackPanel) index cell =
+    let addEditableCell theme selectedBrush (cellStack: StackPanel) onTextChanged index cell =
         let body = StackPanel(Orientation = Orientation.Vertical, Spacing = 1.0)
 
         body.Children.Add(
@@ -108,7 +127,7 @@ type NotebookWindow(path: string) as this =
                 Background = theme.Dark,
                 MinHeight = 3.0)
 
-        selectedEditor <- Some editor
+        editor.TextChanged.Add(fun _ -> onTextChanged cell.Source editor.Text)
         body.Children.Add(editor) |> ignore
 
         cellStack.Children.Add(
@@ -133,13 +152,22 @@ type NotebookWindow(path: string) as this =
               Muted = SolidColorBrush(Color.FromRgb(170uy, 176uy, 184uy))
               Accent = SolidColorBrush(Color.FromRgb(140uy, 190uy, 255uy)) }
 
+        let headerOptions =
+            { DirtyIndicator = StarWhenDirty }
+
         let selectedBrush = SolidColorBrush(Color.FromRgb(38uy, 72uy, 118uy))
         let root = DockPanel(Background = theme.Dark)
-        let header =
+        let header = DockPanel(Background = theme.Dark)
+        let headerText =
             TextBlock(
                 Foreground = theme.Accent,
                 Background = theme.Dark,
                 TextWrapping = TextWrapping.Wrap)
+        let dirtyIndicator =
+            TextBlock(
+                Foreground = theme.Accent,
+                Background = theme.Dark,
+                Text = "")
 
         let status =
             TextBlock(Text = formattingStatus(), Foreground = theme.Muted, Background = theme.Dark, TextWrapping = TextWrapping.Wrap)
@@ -173,7 +201,15 @@ type NotebookWindow(path: string) as this =
         let applySelectedEdit () =
             selectedEditor
             |> Option.iter (fun editor ->
-                cells <- cells |> replaceCellSource selectedIndex editor.Text)
+                let currentSource =
+                    cells
+                    |> List.tryItem selectedIndex
+                    |> Option.map _.Source
+                    |> Option.defaultValue ""
+
+                if editor.Text <> currentSource then
+                    cells <- cells |> replaceCellSource selectedIndex editor.Text
+                    isDirty <- true)
 
         let cellStack = StackPanel(Orientation = Orientation.Vertical, Spacing = 1.0)
 
@@ -184,14 +220,22 @@ type NotebookWindow(path: string) as this =
             isEditing && index = selectedIndex
 
         let updateHeader () =
+            dirtyIndicator.Text <- NotebookHeader.dirtyIndicatorText headerOptions isDirty
+
             if cells.IsEmpty then
-                header.Text <- "lfsx  no cells  Ctrl+C quit"
+                headerText.Text <- "lfsx  no cells  Ctrl+C quit"
             else
-                header.Text <-
+                headerText.Text <-
                     sprintf "lfsx  cell %d/%d  %s  Up/Down move  Enter edit  Esc select  Ctrl+C quit"
                         (selectedIndex + 1)
                         cells.Length
                         (modeLabel())
+
+        let markDirty originalSource editedSource =
+            if editedSource <> originalSource && not isDirty then
+                isDirty <- true
+                setStatus "Unsaved in-memory edits."
+                updateHeader()
 
         let rebuildCells () =
             selectedEditor <- None
@@ -200,7 +244,7 @@ type NotebookWindow(path: string) as this =
             cells
             |> List.iteri (fun index cell ->
                 if isSelectedEditor index then
-                    selectedEditor <- Some(addEditableCell theme selectedBrush cellStack index cell)
+                    selectedEditor <- Some(addEditableCell theme selectedBrush cellStack markDirty index cell)
                 else
                     addCellPreview theme selectedBrush selectedIndex cellStack index cell)
 
@@ -226,16 +270,46 @@ type NotebookWindow(path: string) as this =
                 isEditing <- true
                 rebuildCells()
 
+        let reloadFromDisk message =
+            let nextParsed, nextWriteTimeUtc = FilePersistence.load path
+            parsed <- nextParsed
+            lastWriteTimeUtc <- nextWriteTimeUtc
+            cells <- parsed.Document.Cells
+            selectedIndex <- if cells.IsEmpty then 0 else Math.Clamp(selectedIndex, 0, cells.Length - 1)
+            isDirty <- false
+            isEditing <- false
+            hasExternalChanges <- false
+            setStatus message
+            rebuildCells()
+
+        let checkExternalChange () =
+            let fileChanged = FilePersistence.hasChanged path lastWriteTimeUtc
+
+            match FilePersistence.decideExternalChange persistenceMode fileChanged isDirty isEditing hasExternalChanges with
+            | IgnoreExternalChange -> ()
+            | ReloadExternalChange ->
+                reloadFromDisk "Reloaded external file changes."
+            | KeepInMemoryAndNotify ->
+                hasExternalChanges <- true
+                setStatus "File changed on disk; in-memory edits kept."
+
         let endEditing () =
             if isEditing then
                 applySelectedEdit()
                 isEditing <- false
-                rebuildCells()
+
+                if hasExternalChanges && not isDirty then
+                    reloadFromDisk "Reloaded external file changes."
+                else
+                    rebuildCells()
 
         let scroll = ScrollViewer(Content = cellStack, Background = theme.Dark, Focusable = false)
 
         DockPanel.SetDock(header, Dock.Top)
         DockPanel.SetDock(status, Dock.Bottom)
+        DockPanel.SetDock(dirtyIndicator, Dock.Right)
+        header.Children.Add(dirtyIndicator) |> ignore
+        header.Children.Add(headerText) |> ignore
         root.Children.Add(header) |> ignore
         root.Children.Add(status) |> ignore
         root.Children.Add(scroll) |> ignore
@@ -245,6 +319,14 @@ type NotebookWindow(path: string) as this =
         base.Content <- root
 
         rebuildCells()
+
+        match persistenceMode with
+        | NoPersistence -> ()
+        | AutoReloadWhenClean ->
+            let externalChangeTimer = DispatcherTimer()
+            externalChangeTimer.Interval <- TimeSpan.FromSeconds 1.0
+            externalChangeTimer.Tick.Add(fun _ -> checkExternalChange())
+            externalChangeTimer.Start()
 
         this.AddHandler(InputElement.KeyDownEvent, (fun _ args ->
             if args.KeyModifiers = KeyModifiers.Control && args.Key = Key.C then
