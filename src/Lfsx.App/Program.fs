@@ -11,6 +11,7 @@ open Avalonia.Input
 open Avalonia.Interactivity
 open Avalonia.Layout
 open Avalonia.Media
+open Avalonia.Threading
 open Consolonia
 open Consolonia.Themes
 open Lfsx.Core
@@ -50,6 +51,9 @@ type NotebookWindow(path: string) as this =
     let quitConfirmationMessage = "Press Ctrl+C again to quit, or Esc to cancel."
     let mutable quitConfirmation = Hidden
     let mutable selectedIndex = 0
+    let mutable cells = parsed.Document.Cells
+    let mutable isEditing = false
+    let mutable selectedEditor: TextBox option = None
 
     let formattingStatus () =
         if parsed.FormattingDiagnostics.IsEmpty then
@@ -87,6 +91,40 @@ type NotebookWindow(path: string) as this =
                 Margin = Thickness(0.0, 0.0, 0.0, 1.0),
                 Child = body)) |> ignore
 
+    let addEditableCell theme selectedBrush (cellStack: StackPanel) index cell =
+        let body = StackPanel(Orientation = Orientation.Vertical, Spacing = 1.0)
+
+        body.Children.Add(
+            TextBlock(
+                Text = sprintf "[%02d] %s" (index + 1) (cellKindLabel cell.Kind),
+                Foreground = theme.Accent)) |> ignore
+
+        let editor =
+            TextBox(
+                Text = cell.Source,
+                AcceptsReturn = true,
+                TextWrapping = TextWrapping.NoWrap,
+                Foreground = theme.Text,
+                Background = theme.Dark,
+                MinHeight = 3.0)
+
+        selectedEditor <- Some editor
+        body.Children.Add(editor) |> ignore
+
+        cellStack.Children.Add(
+            Border(
+                Background = selectedBrush,
+                Padding = Thickness(1.0),
+                Margin = Thickness(0.0, 0.0, 0.0, 1.0),
+                Child = body)) |> ignore
+
+        editor
+
+    let replaceCellSource selectedIndex source cells =
+        cells
+        |> List.mapi (fun index cell ->
+            if index = selectedIndex then { cell with Source = source } else cell)
+
     do
         let theme =
             { Dark = SolidColorBrush(Color.FromRgb(18uy, 18uy, 18uy))
@@ -96,7 +134,6 @@ type NotebookWindow(path: string) as this =
               Accent = SolidColorBrush(Color.FromRgb(140uy, 190uy, 255uy)) }
 
         let selectedBrush = SolidColorBrush(Color.FromRgb(38uy, 72uy, 118uy))
-        let cells = parsed.Document.Cells
         let root = DockPanel(Background = theme.Dark)
         let header =
             TextBlock(
@@ -133,33 +170,67 @@ type NotebookWindow(path: string) as this =
             quitConfirmation <- Hidden
             restoreStatus status
 
+        let applySelectedEdit () =
+            selectedEditor
+            |> Option.iter (fun editor ->
+                cells <- cells |> replaceCellSource selectedIndex editor.Text)
+
         let cellStack = StackPanel(Orientation = Orientation.Vertical, Spacing = 1.0)
+
+        let modeLabel () =
+            if isEditing then "editing" else "selection"
+
+        let isSelectedEditor index =
+            isEditing && index = selectedIndex
 
         let updateHeader () =
             if cells.IsEmpty then
                 header.Text <- "lfsx  no cells  Ctrl+C quit"
             else
                 header.Text <-
-                    sprintf "lfsx  cell %d/%d  Up/Down move  Ctrl+C quit"
+                    sprintf "lfsx  cell %d/%d  %s  Up/Down move  Enter edit  Esc select  Ctrl+C quit"
                         (selectedIndex + 1)
                         cells.Length
+                        (modeLabel())
 
         let rebuildCells () =
+            selectedEditor <- None
             cellStack.Children.Clear()
 
             cells
-            |> List.iteri (addCellPreview theme selectedBrush selectedIndex cellStack)
+            |> List.iteri (fun index cell ->
+                if isSelectedEditor index then
+                    selectedEditor <- Some(addEditableCell theme selectedBrush cellStack index cell)
+                else
+                    addCellPreview theme selectedBrush selectedIndex cellStack index cell)
 
             updateHeader()
 
+            selectedEditor
+            |> Option.iter (fun editor ->
+                Dispatcher.UIThread.Post(fun () ->
+                    editor.Focus() |> ignore
+                    editor.CaretIndex <- editor.Text.Length))
+
         let moveSelection delta =
-            if not cells.IsEmpty then
+            if not isEditing && not cells.IsEmpty then
                 let last = cells.Length - 1
                 let next = Math.Clamp(selectedIndex + delta, 0, last)
 
                 if next <> selectedIndex then
                     selectedIndex <- next
                     rebuildCells()
+
+        let beginEditing () =
+            if not cells.IsEmpty && not isEditing then
+                isEditing <- true
+                rebuildCells()
+
+        let endEditing () =
+            if isEditing then
+                applySelectedEdit()
+                isEditing <- false
+                rebuildCells()
 
         let scroll = ScrollViewer(Content = cellStack, Background = theme.Dark, Focusable = false)
 
@@ -179,12 +250,18 @@ type NotebookWindow(path: string) as this =
             if args.KeyModifiers = KeyModifiers.Control && args.Key = Key.C then
                 args.Handled <- true
                 requestQuit()
-            elif args.Key = Key.Down then
+            elif args.Key = Key.Down && not isEditing then
                 args.Handled <- true
                 moveSelection 1
-            elif args.Key = Key.Up then
+            elif args.Key = Key.Up && not isEditing then
                 args.Handled <- true
                 moveSelection -1
+            elif args.Key = Key.Enter && not isEditing then
+                args.Handled <- true
+                beginEditing()
+            elif args.Key = Key.Escape && isEditing then
+                args.Handled <- true
+                endEditing()
             elif args.Key = Key.Escape && quitConfirmation <> Hidden then
                 args.Handled <- true
                 cancelQuitConfirmation()),
