@@ -238,12 +238,19 @@ type NotebookWindow(path: string) as this =
             if cells.IsEmpty then
                 headerText.Text <- "lfsx  no cells  Ctrl+C quit"
             else
+                let saveHint =
+                    if isDirty && FilePersistence.canSave persistenceMode then
+                        "  Ctrl+S save"
+                    else
+                        String.Empty
+
                 headerText.Text <-
                     sprintf
-                        "lfsx  cell %d/%d  %s  Up/Down move  Enter edit  Esc select  Ctrl+C quit"
+                        "lfsx  cell %d/%d  %s  Up/Down move  Enter edit  Esc select%s  Ctrl+C quit"
                         (selectedIndex + 1)
                         cells.Length
                         (modeLabel ())
+                        saveHint
 
         let markDirty originalSource editedSource =
             if editedSource <> originalSource && not isDirty then
@@ -310,6 +317,28 @@ type NotebookWindow(path: string) as this =
             setStatus message
             rebuildCells ()
 
+        let saveToDisk () =
+            if FilePersistence.canSave persistenceMode then
+                applySelectedEdit ()
+
+                let saveStatus =
+                    if hasExternalChanges then
+                        "Saved; external file changes overwritten."
+                    else
+                        "Saved."
+
+                let nextParsed, nextWriteTimeUtc = FilePersistence.save path cells
+                parsed <- nextParsed
+                lastWriteTimeUtc <- nextWriteTimeUtc
+                cells <- parsed.Document.Cells
+                selectedIndex <- if cells.IsEmpty then 0 else Math.Clamp(selectedIndex, 0, cells.Length - 1)
+                isDirty <- false
+                hasExternalChanges <- false
+                setStatus saveStatus
+                rebuildCells ()
+            else
+                setStatus "Saving is disabled."
+
         let checkExternalChange () =
             let fileChanged = FilePersistence.hasChanged path lastWriteTimeUtc
 
@@ -364,6 +393,9 @@ type NotebookWindow(path: string) as this =
                 if args.KeyModifiers = KeyModifiers.Control && args.Key = Key.C then
                     args.Handled <- true
                     requestQuit ()
+                elif args.KeyModifiers = KeyModifiers.Control && args.Key = Key.S then
+                    args.Handled <- true
+                    saveToDisk ()
                 elif args.Key = Key.Down && not isEditing then
                     args.Handled <- true
                     moveSelection 1
