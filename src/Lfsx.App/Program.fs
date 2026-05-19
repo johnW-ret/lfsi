@@ -105,15 +105,16 @@ type NotebookWindow(path: string) as this =
         )
         |> ignore
 
-        cellStack.Children.Add(
+        let frame =
             Border(
                 Background = (if isSelected then selectedBrush else theme.Panel),
                 Padding = Thickness(1.0),
                 Margin = Thickness(0.0, 0.0, 0.0, 1.0),
                 Child = body
             )
-        )
-        |> ignore
+
+        cellStack.Children.Add(frame) |> ignore
+        frame
 
     let addEditableCell theme selectedBrush (cellStack: StackPanel) onTextChanged index cell =
         let body = StackPanel(Orientation = Orientation.Vertical, Spacing = 1.0)
@@ -224,6 +225,7 @@ type NotebookWindow(path: string) as this =
                     isDirty <- true)
 
         let cellStack = StackPanel(Orientation = Orientation.Vertical, Spacing = 1.0)
+        let mutable selectedFrame: Control option = None
 
         let modeLabel () =
             if isEditing then "editing" else "selection"
@@ -251,6 +253,7 @@ type NotebookWindow(path: string) as this =
 
         let rebuildCells () =
             selectedEditor <- None
+            selectedFrame <- None
             cellStack.Children.Clear()
 
             cells
@@ -258,7 +261,10 @@ type NotebookWindow(path: string) as this =
                 if isSelectedEditor index then
                     selectedEditor <- Some(addEditableCell theme selectedBrush cellStack markDirty index cell)
                 else
-                    addCellPreview theme selectedBrush selectedIndex cellStack index cell)
+                    let frame = addCellPreview theme selectedBrush selectedIndex cellStack index cell
+
+                    if index = selectedIndex then
+                        selectedFrame <- Some frame)
 
             updateHeader ()
 
@@ -267,6 +273,10 @@ type NotebookWindow(path: string) as this =
                 Dispatcher.UIThread.Post(fun () ->
                     editor.Focus() |> ignore
                     editor.CaretIndex <- editor.Text.Length))
+
+            selectedFrame
+            |> Option.iter (fun frame ->
+                Dispatcher.UIThread.Post(fun () -> frame.BringIntoView()))
 
         let moveSelection delta =
             if not isEditing && not cells.IsEmpty then
