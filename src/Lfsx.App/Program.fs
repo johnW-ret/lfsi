@@ -28,9 +28,11 @@ module NativeEnvironment =
 
     // .NET environment mutation is not visible to native getenv on Unix for some reason
     let setIfMissing name value =
-        if not (OperatingSystem.IsWindows())
-           && (Environment.GetEnvironmentVariable(name) |> String.IsNullOrWhiteSpace) then
-            setenv(name, value, 1) |> ignore
+        if
+            not (OperatingSystem.IsWindows())
+            && (Environment.GetEnvironmentVariable(name) |> String.IsNullOrWhiteSpace)
+        then
+            setenv (name, value, 1) |> ignore
 
 type QuitConfirmation =
     | Hidden
@@ -48,8 +50,7 @@ type DirtyIndicator =
     | HideDirtyIndicator
     | StarWhenDirty
 
-type NotebookHeaderOptions =
-    { DirtyIndicator: DirtyIndicator }
+type NotebookHeaderOptions = { DirtyIndicator: DirtyIndicator }
 
 module NotebookHeader =
     let dirtyIndicatorText options isDirty =
@@ -80,8 +81,7 @@ type NotebookWindow(path: string) as this =
         else
             "FSharp.Formatting parse: " + String.concat "; " parsed.FormattingDiagnostics
 
-    let restoreStatus (status: TextBlock) =
-        status.Text <- formattingStatus()
+    let restoreStatus (status: TextBlock) = status.Text <- formattingStatus ()
 
     let cellKindLabel kind =
         match kind with
@@ -95,28 +95,33 @@ type NotebookWindow(path: string) as this =
         body.Children.Add(
             TextBlock(
                 Text = sprintf "[%02d] %s" (index + 1) (cellKindLabel cell.Kind),
-                Foreground = (if isSelected then theme.Accent else theme.Muted))) |> ignore
+                Foreground = (if isSelected then theme.Accent else theme.Muted)
+            )
+        )
+        |> ignore
 
         body.Children.Add(
-            TextBlock(
-                Text = cell.Source.TrimEnd(),
-                Foreground = theme.Text,
-                TextWrapping = TextWrapping.NoWrap)) |> ignore
+            TextBlock(Text = cell.Source.TrimEnd(), Foreground = theme.Text, TextWrapping = TextWrapping.NoWrap)
+        )
+        |> ignore
 
         cellStack.Children.Add(
             Border(
                 Background = (if isSelected then selectedBrush else theme.Panel),
                 Padding = Thickness(1.0),
                 Margin = Thickness(0.0, 0.0, 0.0, 1.0),
-                Child = body)) |> ignore
+                Child = body
+            )
+        )
+        |> ignore
 
     let addEditableCell theme selectedBrush (cellStack: StackPanel) onTextChanged index cell =
         let body = StackPanel(Orientation = Orientation.Vertical, Spacing = 1.0)
 
         body.Children.Add(
-            TextBlock(
-                Text = sprintf "[%02d] %s" (index + 1) (cellKindLabel cell.Kind),
-                Foreground = theme.Accent)) |> ignore
+            TextBlock(Text = sprintf "[%02d] %s" (index + 1) (cellKindLabel cell.Kind), Foreground = theme.Accent)
+        )
+        |> ignore
 
         let editor =
             TextBox(
@@ -125,7 +130,8 @@ type NotebookWindow(path: string) as this =
                 TextWrapping = TextWrapping.NoWrap,
                 Foreground = theme.Text,
                 Background = theme.Dark,
-                MinHeight = 3.0)
+                MinHeight = 3.0
+            )
 
         editor.TextChanged.Add(fun _ -> onTextChanged cell.Source editor.Text)
         body.Children.Add(editor) |> ignore
@@ -135,14 +141,20 @@ type NotebookWindow(path: string) as this =
                 Background = selectedBrush,
                 Padding = Thickness(1.0),
                 Margin = Thickness(0.0, 0.0, 0.0, 1.0),
-                Child = body)) |> ignore
+                Child = body
+            )
+        )
+        |> ignore
 
         editor
 
     let replaceCellSource selectedIndex source cells =
         cells
         |> List.mapi (fun index cell ->
-            if index = selectedIndex then { cell with Source = source } else cell)
+            if index = selectedIndex then
+                { cell with Source = source }
+            else
+                cell)
 
     do
         let theme =
@@ -152,28 +164,27 @@ type NotebookWindow(path: string) as this =
               Muted = SolidColorBrush(Color.FromRgb(170uy, 176uy, 184uy))
               Accent = SolidColorBrush(Color.FromRgb(140uy, 190uy, 255uy)) }
 
-        let headerOptions =
-            { DirtyIndicator = StarWhenDirty }
+        let headerOptions = { DirtyIndicator = StarWhenDirty }
 
         let selectedBrush = SolidColorBrush(Color.FromRgb(38uy, 72uy, 118uy))
         let root = DockPanel(Background = theme.Dark)
         let header = DockPanel(Background = theme.Dark)
+
         let headerText =
-            TextBlock(
-                Foreground = theme.Accent,
-                Background = theme.Dark,
-                TextWrapping = TextWrapping.Wrap)
+            TextBlock(Foreground = theme.Accent, Background = theme.Dark, TextWrapping = TextWrapping.Wrap)
+
         let dirtyIndicator =
-            TextBlock(
-                Foreground = theme.Accent,
-                Background = theme.Dark,
-                Text = "")
+            TextBlock(Foreground = theme.Accent, Background = theme.Dark, Text = "")
 
         let status =
-            TextBlock(Text = formattingStatus(), Foreground = theme.Muted, Background = theme.Dark, TextWrapping = TextWrapping.Wrap)
+            TextBlock(
+                Text = formattingStatus (),
+                Foreground = theme.Muted,
+                Background = theme.Dark,
+                TextWrapping = TextWrapping.Wrap
+            )
 
-        let setStatus message =
-            status.Text <- message
+        let setStatus message = status.Text <- message
 
         let quit () =
             match Application.Current.ApplicationLifetime with
@@ -186,13 +197,14 @@ type NotebookWindow(path: string) as this =
                 quitConfirmation <- Arming
                 setStatus quitConfirmationMessage
 
-                Task.Delay(1).ContinueWith(fun _ ->
-                    if quitConfirmation = Arming then
-                        quitConfirmation <- Armed) |> ignore
-            | Arming ->
-                setStatus quitConfirmationMessage
-            | Armed ->
-                quit()
+                Task
+                    .Delay(1)
+                    .ContinueWith(fun _ ->
+                        if quitConfirmation = Arming then
+                            quitConfirmation <- Armed)
+                |> ignore
+            | Arming -> setStatus quitConfirmationMessage
+            | Armed -> quit ()
 
         let cancelQuitConfirmation () =
             quitConfirmation <- Hidden
@@ -216,8 +228,7 @@ type NotebookWindow(path: string) as this =
         let modeLabel () =
             if isEditing then "editing" else "selection"
 
-        let isSelectedEditor index =
-            isEditing && index = selectedIndex
+        let isSelectedEditor index = isEditing && index = selectedIndex
 
         let updateHeader () =
             dirtyIndicator.Text <- NotebookHeader.dirtyIndicatorText headerOptions isDirty
@@ -226,16 +237,17 @@ type NotebookWindow(path: string) as this =
                 headerText.Text <- "lfsx  no cells  Ctrl+C quit"
             else
                 headerText.Text <-
-                    sprintf "lfsx  cell %d/%d  %s  Up/Down move  Enter edit  Esc select  Ctrl+C quit"
+                    sprintf
+                        "lfsx  cell %d/%d  %s  Up/Down move  Enter edit  Esc select  Ctrl+C quit"
                         (selectedIndex + 1)
                         cells.Length
-                        (modeLabel())
+                        (modeLabel ())
 
         let markDirty originalSource editedSource =
             if editedSource <> originalSource && not isDirty then
                 isDirty <- true
                 setStatus "Unsaved in-memory edits."
-                updateHeader()
+                updateHeader ()
 
         let rebuildCells () =
             selectedEditor <- None
@@ -248,7 +260,7 @@ type NotebookWindow(path: string) as this =
                 else
                     addCellPreview theme selectedBrush selectedIndex cellStack index cell)
 
-            updateHeader()
+            updateHeader ()
 
             selectedEditor
             |> Option.iter (fun editor ->
@@ -263,47 +275,55 @@ type NotebookWindow(path: string) as this =
 
                 if next <> selectedIndex then
                     selectedIndex <- next
-                    rebuildCells()
+                    rebuildCells ()
 
         let beginEditing () =
             if not cells.IsEmpty && not isEditing then
                 isEditing <- true
-                rebuildCells()
+                rebuildCells ()
 
         let reloadFromDisk message =
             let nextParsed, nextWriteTimeUtc = FilePersistence.load path
             parsed <- nextParsed
             lastWriteTimeUtc <- nextWriteTimeUtc
             cells <- parsed.Document.Cells
-            selectedIndex <- if cells.IsEmpty then 0 else Math.Clamp(selectedIndex, 0, cells.Length - 1)
+
+            selectedIndex <-
+                if cells.IsEmpty then
+                    0
+                else
+                    Math.Clamp(selectedIndex, 0, cells.Length - 1)
+
             isDirty <- false
             isEditing <- false
             hasExternalChanges <- false
             setStatus message
-            rebuildCells()
+            rebuildCells ()
 
         let checkExternalChange () =
             let fileChanged = FilePersistence.hasChanged path lastWriteTimeUtc
 
-            match FilePersistence.decideExternalChange persistenceMode fileChanged isDirty isEditing hasExternalChanges with
+            match
+                FilePersistence.decideExternalChange persistenceMode fileChanged isDirty isEditing hasExternalChanges
+            with
             | IgnoreExternalChange -> ()
-            | ReloadExternalChange ->
-                reloadFromDisk "Reloaded external file changes."
+            | ReloadExternalChange -> reloadFromDisk "Reloaded external file changes."
             | KeepInMemoryAndNotify ->
                 hasExternalChanges <- true
                 setStatus "File changed on disk; in-memory edits kept."
 
         let endEditing () =
             if isEditing then
-                applySelectedEdit()
+                applySelectedEdit ()
                 isEditing <- false
 
                 if hasExternalChanges && not isDirty then
                     reloadFromDisk "Reloaded external file changes."
                 else
-                    rebuildCells()
+                    rebuildCells ()
 
-        let scroll = ScrollViewer(Content = cellStack, Background = theme.Dark, Focusable = false)
+        let scroll =
+            ScrollViewer(Content = cellStack, Background = theme.Dark, Focusable = false)
 
         DockPanel.SetDock(header, Dock.Top)
         DockPanel.SetDock(status, Dock.Bottom)
@@ -318,48 +338,49 @@ type NotebookWindow(path: string) as this =
         base.Background <- theme.Dark
         base.Content <- root
 
-        rebuildCells()
+        rebuildCells ()
 
         match persistenceMode with
         | NoPersistence -> ()
         | AutoReloadWhenClean ->
             let externalChangeTimer = DispatcherTimer()
             externalChangeTimer.Interval <- TimeSpan.FromSeconds 1.0
-            externalChangeTimer.Tick.Add(fun _ -> checkExternalChange())
+            externalChangeTimer.Tick.Add(fun _ -> checkExternalChange ())
             externalChangeTimer.Start()
 
-        this.AddHandler(InputElement.KeyDownEvent, (fun _ args ->
-            if args.KeyModifiers = KeyModifiers.Control && args.Key = Key.C then
-                args.Handled <- true
-                requestQuit()
-            elif args.Key = Key.Down && not isEditing then
-                args.Handled <- true
-                moveSelection 1
-            elif args.Key = Key.Up && not isEditing then
-                args.Handled <- true
-                moveSelection -1
-            elif args.Key = Key.Enter && not isEditing then
-                args.Handled <- true
-                beginEditing()
-            elif args.Key = Key.Escape && isEditing then
-                args.Handled <- true
-                endEditing()
-            elif args.Key = Key.Escape && quitConfirmation <> Hidden then
-                args.Handled <- true
-                cancelQuitConfirmation()),
+        this.AddHandler(
+            InputElement.KeyDownEvent,
+            (fun _ args ->
+                if args.KeyModifiers = KeyModifiers.Control && args.Key = Key.C then
+                    args.Handled <- true
+                    requestQuit ()
+                elif args.Key = Key.Down && not isEditing then
+                    args.Handled <- true
+                    moveSelection 1
+                elif args.Key = Key.Up && not isEditing then
+                    args.Handled <- true
+                    moveSelection -1
+                elif args.Key = Key.Enter && not isEditing then
+                    args.Handled <- true
+                    beginEditing ()
+                elif args.Key = Key.Escape && isEditing then
+                    args.Handled <- true
+                    endEditing ()
+                elif args.Key = Key.Escape && quitConfirmation <> Hidden then
+                    args.Handled <- true
+                    cancelQuitConfirmation ()),
             RoutingStrategies.Tunnel,
-            true)
+            true
+        )
 
 type App(path: string) =
     inherit Application()
 
-    override this.Initialize() =
-        this.Styles.Add(ModernTheme())
+    override this.Initialize() = this.Styles.Add(ModernTheme())
 
     override _.OnFrameworkInitializationCompleted() =
         match base.ApplicationLifetime with
-        | :? IClassicDesktopStyleApplicationLifetime as desktop ->
-            desktop.MainWindow <- NotebookWindow(path)
+        | :? IClassicDesktopStyleApplicationLifetime as desktop -> desktop.MainWindow <- NotebookWindow(path)
         | _ -> ()
 
         base.OnFrameworkInitializationCompleted()
@@ -369,13 +390,9 @@ module Program =
         NativeEnvironment.setIfMissing NativeEnvironment.EscDelayName NativeEnvironment.DefaultEscDelay
 
     let private buildApp path =
-        configureTerminalEnvironment()
+        configureTerminalEnvironment ()
 
-        AppBuilder
-            .Configure(fun () -> App(path))
-            .UseConsolonia()
-            .UseAutoDetectedConsole()
-            .LogToException()
+        AppBuilder.Configure(fun () -> App(path)).UseConsolonia().UseAutoDetectedConsole().LogToException()
 
     [<EntryPoint>]
     let main argv =
@@ -384,8 +401,7 @@ module Program =
             let html = LiterateScript.toHtml (Some file) (File.ReadAllText file)
             printf "%s" html
             0
-        | file :: _ when File.Exists file ->
-            (buildApp file).StartWithConsoleLifetime(argv)
+        | file :: _ when File.Exists file -> (buildApp file).StartWithConsoleLifetime(argv)
         | _ ->
             eprintfn "Pass an .fsx file path."
             1
