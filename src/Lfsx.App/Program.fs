@@ -3,6 +3,7 @@ namespace Lfsx.App
 open System
 open System.IO
 open System.Runtime.InteropServices
+open System.Threading
 open System.Threading.Tasks
 open Avalonia
 open Avalonia.Controls
@@ -64,6 +65,16 @@ type NotebookWindow(path: string) as this =
 
     let initialParsed, initialWriteTimeUtc = FilePersistence.load path
     let persistenceMode = AutoReloadWhenClean
+
+    let fsiWorkingDirectory =
+        let directory = Path.GetDirectoryName path
+
+        if String.IsNullOrWhiteSpace directory then
+            Environment.CurrentDirectory
+        else
+            directory
+
+    let fsi = new FsiSession(fsiWorkingDirectory)
     let quitConfirmationMessage = "Press Ctrl+C again to quit, or Esc to cancel."
     let mutable parsed = initialParsed
     let mutable lastWriteTimeUtc = initialWriteTimeUtc
@@ -72,6 +83,7 @@ type NotebookWindow(path: string) as this =
     let mutable cells = parsed.Document.Cells
     let mutable isDirty = false
     let mutable isEditing = false
+    let mutable isRunning = false
     let mutable hasExternalChanges = false
     let mutable selectedEditor: TextBox option = None
 
@@ -88,7 +100,29 @@ type NotebookWindow(path: string) as this =
         | CellKind.Markdown -> "markdown"
         | CellKind.Code -> "fsx"
 
-    let addCellPreview theme selectedBrush selectedIndex (cellStack: StackPanel) index cell =
+    let outputText output =
+        match output with
+        | NotebookOutput.Text value -> value
+        | NotebookOutput.Html value -> "[html]\n" + value
+        | NotebookOutput.Error value -> "[error]\n" + value
+
+    let addCellOutputs theme errorBrush (body: StackPanel) cell =
+        if not cell.Outputs.IsEmpty then
+            let renderedOutput =
+                cell.Outputs |> List.map outputText |> String.concat "\n\n"
+
+            let outputBrush =
+                if cell.Outputs |> List.exists (function NotebookOutput.Error _ -> true | _ -> false) then
+                    errorBrush
+                else
+                    theme.Muted
+
+            body.Children.Add(
+                TextBlock(Text = renderedOutput, Foreground = outputBrush, TextWrapping = TextWrapping.Wrap)
+            )
+            |> ignore
+
+    let addCellPreview theme selectedBrush errorBrush selectedIndex (cellStack: StackPanel) index cell =
         let isSelected = index = selectedIndex
         let body = StackPanel(Orientation = Orientation.Vertical, Spacing = 1.0)
 
@@ -105,6 +139,8 @@ type NotebookWindow(path: string) as this =
         )
         |> ignore
 
+        addCellOutputs theme errorBrush body cell
+
         let frame =
             Border(
                 Background = (if isSelected then selectedBrush else theme.Panel),
@@ -116,7 +152,7 @@ type NotebookWindow(path: string) as this =
         cellStack.Children.Add(frame) |> ignore
         frame
 
-    let addEditableCell theme selectedBrush (cellStack: StackPanel) onTextChanged index cell =
+    let addEditableCell theme selectedBrush errorBrush (cellStack: StackPanel) onTextChanged index cell =
         let body = StackPanel(Orientation = Orientation.Vertical, Spacing = 1.0)
 
         body.Children.Add(
@@ -136,6 +172,7 @@ type NotebookWindow(path: string) as this =
 
         editor.TextChanged.Add(fun _ -> onTextChanged cell.Source editor.Text)
         body.Children.Add(editor) |> ignore
+        addCellOutputs theme errorBrush body cell
 
         cellStack.Children.Add(
             Border(
@@ -157,6 +194,14 @@ type NotebookWindow(path: string) as this =
             else
                 cell)
 
+    let replaceCellOutput selectedIndex output cells =
+        cells
+        |> List.mapi (fun index cell ->
+            if index = selectedIndex then
+                { cell with Outputs = [ output ] }
+            else
+                cell)
+
     do
         let theme =
             { Dark = SolidColorBrush(Color.FromRgb(18uy, 18uy, 18uy))
@@ -168,6 +213,7 @@ type NotebookWindow(path: string) as this =
         let headerOptions = { DirtyIndicator = StarWhenDirty }
 
         let selectedBrush = SolidColorBrush(Color.FromRgb(38uy, 72uy, 118uy))
+        let errorBrush = SolidColorBrush(Color.FromRgb(255uy, 150uy, 150uy))
         let root = DockPanel(Background = theme.Dark)
         let header = DockPanel(Background = theme.Dark)
 
@@ -228,7 +274,14 @@ type NotebookWindow(path: string) as this =
         let mutable selectedFrame: Control option = None
 
         let modeLabel () =
-            if isEditing then "editing" else "selection"
+            if isRunning then "running"
+            elif isEditing then "editing"
+            else "selection"
+
+        let selectedRunnableCell () =
+            cells
+            |> List.tryItem selectedIndex
+            |> Option.filter (fun cell -> cell.Kind = CellKind.Code)
 
         let isSelectedEditor index = isEditing && index = selectedIndex
 
@@ -244,12 +297,19 @@ type NotebookWindow(path: string) as this =
                     else
                         String.Empty
 
+                let runHint =
+                    if selectedRunnableCell () |> Option.isSome then
+                        "  F5 run cell"
+                    else
+                        String.Empty
+
                 headerText.Text <-
                     sprintf
-                        "lfsx  cell %d/%d  %s  Up/Down move  Enter edit  Esc select%s  Ctrl+C quit"
+                        "lfsx  cell %d/%d  %s  Up/Down move  Enter edit  Esc select%s%s  Ctrl+C quit"
                         (selectedIndex + 1)
                         cells.Length
                         (modeLabel ())
+                        runHint
                         saveHint
 
         let markDirty originalSource editedSource =
@@ -266,9 +326,9 @@ type NotebookWindow(path: string) as this =
             cells
             |> List.iteri (fun index cell ->
                 if isSelectedEditor index then
-                    selectedEditor <- Some(addEditableCell theme selectedBrush cellStack markDirty index cell)
+                    selectedEditor <- Some(addEditableCell theme selectedBrush errorBrush cellStack markDirty index cell)
                 else
-                    let frame = addCellPreview theme selectedBrush selectedIndex cellStack index cell
+                    let frame = addCellPreview theme selectedBrush errorBrush selectedIndex cellStack index cell
 
                     if index = selectedIndex then
                         selectedFrame <- Some frame)
@@ -295,7 +355,7 @@ type NotebookWindow(path: string) as this =
                     rebuildCells ()
 
         let beginEditing () =
-            if not cells.IsEmpty && not isEditing then
+            if not cells.IsEmpty && not isEditing && not isRunning then
                 isEditing <- true
                 rebuildCells ()
 
@@ -361,6 +421,35 @@ type NotebookWindow(path: string) as this =
                 else
                     rebuildCells ()
 
+        let runSelectedAsync () =
+            task {
+                match selectedRunnableCell () with
+                | Some cell when not isRunning ->
+                    isRunning <- true
+                    applySelectedEdit ()
+                    isEditing <- false
+                    setStatus "Running selected cell..."
+                    rebuildCells ()
+
+                    try
+                        let! result = fsi.ExecuteAsync(cell.Source, CancellationToken.None)
+
+                        do!
+                            Dispatcher.UIThread.InvokeAsync(fun () ->
+                                cells <- cells |> replaceCellOutput selectedIndex result.Output
+                                isRunning <- false
+                                setStatus "Ready"
+                                rebuildCells ())
+                    with ex ->
+                        do!
+                            Dispatcher.UIThread.InvokeAsync(fun () ->
+                                cells <- cells |> replaceCellOutput selectedIndex (NotebookOutput.Error ex.Message)
+                                isRunning <- false
+                                setStatus "Execution failed."
+                                rebuildCells ())
+                | _ -> ()
+            }
+
         let scroll =
             ScrollViewer(Content = cellStack, Background = theme.Dark, Focusable = false)
 
@@ -396,6 +485,9 @@ type NotebookWindow(path: string) as this =
                 elif args.KeyModifiers = KeyModifiers.Control && args.Key = Key.S then
                     args.Handled <- true
                     saveToDisk ()
+                elif args.Key = Key.F5 && (selectedRunnableCell () |> Option.isSome) then
+                    args.Handled <- true
+                    runSelectedAsync () |> ignore
                 elif args.Key = Key.Down && not isEditing then
                     args.Handled <- true
                     moveSelection 1
@@ -414,6 +506,10 @@ type NotebookWindow(path: string) as this =
             RoutingStrategies.Tunnel,
             true
         )
+
+    override _.OnClosed(args) =
+        (fsi :> IDisposable).Dispose()
+        base.OnClosed(args)
 
 type App(path: string) =
     inherit Application()
