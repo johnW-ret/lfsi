@@ -108,11 +108,15 @@ type NotebookWindow(path: string) as this =
 
     let addCellOutputs theme errorBrush (body: StackPanel) cell =
         if not cell.Outputs.IsEmpty then
-            let renderedOutput =
-                cell.Outputs |> List.map outputText |> String.concat "\n\n"
+            let renderedOutput = cell.Outputs |> List.map outputText |> String.concat "\n\n"
 
             let outputBrush =
-                if cell.Outputs |> List.exists (function NotebookOutput.Error _ -> true | _ -> false) then
+                if
+                    cell.Outputs
+                    |> List.exists (function
+                        | NotebookOutput.Error _ -> true
+                        | _ -> false)
+                then
                     errorBrush
                 else
                     theme.Muted
@@ -326,9 +330,11 @@ type NotebookWindow(path: string) as this =
             cells
             |> List.iteri (fun index cell ->
                 if isSelectedEditor index then
-                    selectedEditor <- Some(addEditableCell theme selectedBrush errorBrush cellStack markDirty index cell)
+                    selectedEditor <-
+                        Some(addEditableCell theme selectedBrush errorBrush cellStack markDirty index cell)
                 else
-                    let frame = addCellPreview theme selectedBrush errorBrush selectedIndex cellStack index cell
+                    let frame =
+                        addCellPreview theme selectedBrush errorBrush selectedIndex cellStack index cell
 
                     if index = selectedIndex then
                         selectedFrame <- Some frame)
@@ -342,8 +348,7 @@ type NotebookWindow(path: string) as this =
                     editor.CaretIndex <- editor.Text.Length))
 
             selectedFrame
-            |> Option.iter (fun frame ->
-                Dispatcher.UIThread.Post(fun () -> frame.BringIntoView()))
+            |> Option.iter (fun frame -> Dispatcher.UIThread.Post(fun () -> frame.BringIntoView()))
 
         let moveSelection delta =
             if not isEditing && not cells.IsEmpty then
@@ -391,7 +396,13 @@ type NotebookWindow(path: string) as this =
                 parsed <- nextParsed
                 lastWriteTimeUtc <- nextWriteTimeUtc
                 cells <- parsed.Document.Cells
-                selectedIndex <- if cells.IsEmpty then 0 else Math.Clamp(selectedIndex, 0, cells.Length - 1)
+
+                selectedIndex <-
+                    if cells.IsEmpty then
+                        0
+                    else
+                        Math.Clamp(selectedIndex, 0, cells.Length - 1)
+
                 isDirty <- false
                 hasExternalChanges <- false
                 setStatus saveStatus

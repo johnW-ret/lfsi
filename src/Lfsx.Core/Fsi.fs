@@ -70,7 +70,9 @@ type FsiSession(?workingDirectory: string) =
     member _.ExecuteAsync(code: string, cancellationToken: CancellationToken) =
         task {
             if proc.HasExited then
-                return { Input = code; Output = NotebookOutput.Error "fsi has exited." }
+                return
+                    { Input = code
+                      Output = NotebookOutput.Error "fsi has exited." }
             else
                 let marker = "__LFSX_END_" + Guid.NewGuid().ToString("N") + "__"
                 snapshotAndClear () |> ignore
@@ -103,9 +105,13 @@ type FsiSession(?workingDirectory: string) =
                     let cleaned = cleanOutput marker outText
 
                     if String.IsNullOrWhiteSpace errText then
-                        return { Input = code; Output = NotebookOutput.Text cleaned }
+                        return
+                            { Input = code
+                              Output = NotebookOutput.Text cleaned }
                     else
-                        return { Input = code; Output = NotebookOutput.Error(errText.Trim()) }
+                        return
+                            { Input = code
+                              Output = NotebookOutput.Error(errText.Trim()) }
                 else
                     let text =
                         if String.IsNullOrWhiteSpace errText then
