@@ -9,6 +9,7 @@
     <Compile Include="LiterateSyntax.fs" />
     <Compile Include="Notebook.fs" />
     <Compile Include="LiterateScript.fs" />
+    <Compile Include="Fsi.fs" />
   </ItemGroup>
 
   <ItemGroup>
