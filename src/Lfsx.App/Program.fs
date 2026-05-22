@@ -40,13 +40,6 @@ type QuitConfirmation =
     | Arming
     | Armed
 
-type NotebookTheme =
-    { Dark: SolidColorBrush
-      Panel: SolidColorBrush
-      Text: SolidColorBrush
-      Muted: SolidColorBrush
-      Accent: SolidColorBrush }
-
 type DirtyIndicator =
     | HideDirtyIndicator
     | StarWhenDirty
@@ -100,33 +93,12 @@ type NotebookWindow(path: string) as this =
         | CellKind.Markdown -> "markdown"
         | CellKind.Code -> "fsx"
 
-    let outputText output =
-        match output with
-        | NotebookOutput.Text value -> value
-        | NotebookOutput.Html value -> "[html]\n" + value
-        | NotebookOutput.Error value -> "[error]\n" + value
-
-    let addCellOutputs theme errorBrush (body: StackPanel) cell =
+    let addCellOutputs theme errorBrush visualOutputCache imageBackend (body: StackPanel) cell =
         if not cell.Outputs.IsEmpty then
-            let renderedOutput = cell.Outputs |> List.map outputText |> String.concat "\n\n"
-
-            let outputBrush =
-                if
-                    cell.Outputs
-                    |> List.exists (function
-                        | NotebookOutput.Error _ -> true
-                        | _ -> false)
-                then
-                    errorBrush
-                else
-                    theme.Muted
-
-            body.Children.Add(
-                TextBlock(Text = renderedOutput, Foreground = outputBrush, TextWrapping = TextWrapping.Wrap)
-            )
+            body.Children.Add(OutputRendering.renderOutputs theme errorBrush visualOutputCache imageBackend cell.Outputs)
             |> ignore
 
-    let addCellPreview theme selectedBrush errorBrush selectedIndex (cellStack: StackPanel) index cell =
+    let addCellPreview theme selectedBrush errorBrush visualOutputCache imageBackend selectedIndex (cellStack: StackPanel) index cell =
         let isSelected = index = selectedIndex
         let body = StackPanel(Orientation = Orientation.Vertical, Spacing = 1.0)
 
@@ -143,7 +115,7 @@ type NotebookWindow(path: string) as this =
         )
         |> ignore
 
-        addCellOutputs theme errorBrush body cell
+        addCellOutputs theme errorBrush visualOutputCache imageBackend body cell
 
         let frame =
             Border(
@@ -156,7 +128,7 @@ type NotebookWindow(path: string) as this =
         cellStack.Children.Add(frame) |> ignore
         frame
 
-    let addEditableCell theme selectedBrush errorBrush (cellStack: StackPanel) onTextChanged index cell =
+    let addEditableCell theme selectedBrush errorBrush visualOutputCache imageBackend (cellStack: StackPanel) onTextChanged index cell =
         let body = StackPanel(Orientation = Orientation.Vertical, Spacing = 1.0)
 
         body.Children.Add(
@@ -176,7 +148,7 @@ type NotebookWindow(path: string) as this =
 
         editor.TextChanged.Add(fun _ -> onTextChanged cell.Source editor.Text)
         body.Children.Add(editor) |> ignore
-        addCellOutputs theme errorBrush body cell
+        addCellOutputs theme errorBrush visualOutputCache imageBackend body cell
 
         cellStack.Children.Add(
             Border(
@@ -215,6 +187,10 @@ type NotebookWindow(path: string) as this =
               Accent = SolidColorBrush(Color.FromRgb(140uy, 190uy, 255uy)) }
 
         let headerOptions = { DirtyIndicator = StarWhenDirty }
+        let visualOutputService = ChromeCdpVisualOutputService()
+        let visualOutputCache = MemoryVisualOutputCache(visualOutputService)
+        let imageBackend = KittyImageBackend()
+        let terminalImageLayer = imageBackend :> ITerminalImageLayer
 
         let selectedBrush = SolidColorBrush(Color.FromRgb(38uy, 72uy, 118uy))
         let errorBrush = SolidColorBrush(Color.FromRgb(255uy, 150uy, 150uy))
@@ -277,6 +253,8 @@ type NotebookWindow(path: string) as this =
         let cellStack = StackPanel(Orientation = Orientation.Vertical, Spacing = 1.0)
         let mutable selectedFrame: Control option = None
 
+        let clearTerminalImages () = terminalImageLayer.Clear()
+
         let modeLabel () =
             if isRunning then "running"
             elif isEditing then "editing"
@@ -323,6 +301,7 @@ type NotebookWindow(path: string) as this =
                 updateHeader ()
 
         let rebuildCells () =
+            clearTerminalImages ()
             selectedEditor <- None
             selectedFrame <- None
             cellStack.Children.Clear()
@@ -331,10 +310,10 @@ type NotebookWindow(path: string) as this =
             |> List.iteri (fun index cell ->
                 if isSelectedEditor index then
                     selectedEditor <-
-                        Some(addEditableCell theme selectedBrush errorBrush cellStack markDirty index cell)
+                        Some(addEditableCell theme selectedBrush errorBrush visualOutputCache imageBackend cellStack markDirty index cell)
                 else
                     let frame =
-                        addCellPreview theme selectedBrush errorBrush selectedIndex cellStack index cell
+                        addCellPreview theme selectedBrush errorBrush visualOutputCache imageBackend selectedIndex cellStack index cell
 
                     if index = selectedIndex then
                         selectedFrame <- Some frame)
@@ -463,6 +442,10 @@ type NotebookWindow(path: string) as this =
 
         let scroll =
             ScrollViewer(Content = cellStack, Background = theme.Dark, Focusable = false)
+
+        scroll.ScrollChanged.Add(fun _ ->
+            clearTerminalImages ()
+            cellStack.InvalidateVisual())
 
         DockPanel.SetDock(header, Dock.Top)
         DockPanel.SetDock(status, Dock.Bottom)
