@@ -20,10 +20,6 @@ open Avalonia.Threading
 open Avalonia.VisualTree
 open Lfsx.Core
 
-type TerminalGraphicsProtocol =
-    | Kitty
-    | Sixel
-
 type NotebookTheme =
     { Dark: SolidColorBrush
       Panel: SolidColorBrush
@@ -377,10 +373,17 @@ type ChromeCdpVisualOutputService(?chromePath: string, ?viewportWidth: int, ?vie
                 .GetAwaiter()
                 .GetResult()
 
-type FallbackTerminalImageBackend(protocol: TerminalGraphicsProtocol) =
+type FallbackTerminalImageBackend(protocol: TerminalGraphicsProtocol, ?reason: string) =
+    let reason = defaultArg reason "Terminal graphics backend is unavailable."
+
     interface ITerminalImageBackend with
         member _.Protocol = protocol
         member _.RenderImage(_frame) = None
+
+    interface ITerminalImageLayer with
+        member _.Clear() = ()
+
+    member _.Reason = reason
 
 type private RawTerminalImageControl(
     uploadSequence: string,
@@ -485,17 +488,6 @@ type KittyImageBackend(?maxChunkLength: int, ?reservedRows: int) =
     let activePlacements = Dictionary<int, int * int * int * int * int>()
     let mutable nextImageId = 1
     let mutable nextPlacementId = 1
-
-    let contains (value: string) (part: string) =
-        not (String.IsNullOrWhiteSpace value)
-        && value.Contains(part, StringComparison.OrdinalIgnoreCase)
-
-    let isEnabled () =
-        Environment.GetEnvironmentVariable("LFSX_ENABLE_KITTY_GRAPHICS") = "1"
-        || contains (Environment.GetEnvironmentVariable("TERM")) "xterm-kitty"
-        || contains (Environment.GetEnvironmentVariable("TERM_PROGRAM")) "kitty"
-        || contains (Environment.GetEnvironmentVariable("TERM_PROGRAM")) "ghostty"
-        || contains (Environment.GetEnvironmentVariable("TERM_PROGRAM")) "wezterm"
 
     let imageId imageKey =
         match imageIds.TryGetValue imageKey with
@@ -616,7 +608,7 @@ type KittyImageBackend(?maxChunkLength: int, ?reservedRows: int) =
         member _.Protocol = Kitty
 
         member _.RenderImage(frame) =
-            if frame.MimeType <> MimeTypes.Png || not (isEnabled ()) then
+            if frame.MimeType <> MimeTypes.Png then
                 None
             else
                 let imageKey = string frame.Bytes.Length + ":" + Convert.ToBase64String(frame.Bytes.AsSpan(0, Math.Min(frame.Bytes.Length, 64)))

@@ -1,0 +1,98 @@
+namespace Lfsx.App
+
+open System
+
+type TerminalGraphicsProtocol =
+    | Kitty
+    | Sixel
+    | Osc1337
+
+type TerminalGraphicsMode =
+    | Disabled
+    | Auto
+    | Force of TerminalGraphicsProtocol
+
+type TerminalClient =
+    | KittyTerminal
+    | Ghostty
+    | WezTerm
+    | ITerm2
+    | UnknownTerminal
+
+type TerminalEnvironment =
+    { Term: string option
+      TermProgram: string option
+      GhosttyResourcesDir: string option
+      LfsxTerminalGraphics: string option
+      LfsxEnableKittyGraphics: string option }
+
+type TerminalGraphicsDecision =
+    | UseTerminalGraphics of TerminalGraphicsProtocol
+    | UseTextFallback of string
+
+module TerminalGraphics =
+    let private env name =
+        match Environment.GetEnvironmentVariable name with
+        | value when String.IsNullOrWhiteSpace value -> None
+        | value -> Some value
+
+    let currentEnvironment () =
+        { Term = env "TERM"
+          TermProgram = env "TERM_PROGRAM"
+          GhosttyResourcesDir = env "GHOSTTY_RESOURCES_DIR"
+          LfsxTerminalGraphics = env "LFSX_TERMINAL_GRAPHICS"
+          LfsxEnableKittyGraphics = env "LFSX_ENABLE_KITTY_GRAPHICS" }
+
+    let private contains (part: string) (value: string option) =
+        value
+        |> Option.exists (fun text -> text.Contains(part, StringComparison.OrdinalIgnoreCase))
+
+    let detectClient environment =
+        if contains "xterm-kitty" environment.Term || contains "kitty" environment.TermProgram then
+            KittyTerminal
+        elif contains "xterm-ghostty" environment.Term
+             || contains "ghostty" environment.TermProgram
+             || environment.GhosttyResourcesDir.IsSome then
+            Ghostty
+        elif contains "wezterm" environment.TermProgram then
+            WezTerm
+        elif contains "iTerm.app" environment.TermProgram then
+            ITerm2
+        else
+            UnknownTerminal
+
+    let parseMode environment =
+        match environment.LfsxTerminalGraphics |> Option.map (fun value -> value.Trim().ToLowerInvariant()) with
+        | Some "off"
+        | Some "false"
+        | Some "0"
+        | Some "none"
+        | Some "disabled" ->
+            Disabled
+        | Some "kitty" -> Force Kitty
+        | Some "sixel" -> Force Sixel
+        | Some "osc1337"
+        | Some "iterm2" ->
+            Force Osc1337
+        | Some "auto"
+        | None ->
+            match environment.LfsxEnableKittyGraphics with
+            | Some "1" -> Force Kitty
+            | _ -> Auto
+        | Some _ -> Auto
+
+    let decide environment =
+        match parseMode environment with
+        | Disabled -> UseTextFallback "Terminal graphics are disabled."
+        | Force protocol -> UseTerminalGraphics protocol
+        | Auto ->
+            match detectClient environment with
+            | KittyTerminal
+            | Ghostty ->
+                UseTerminalGraphics Kitty
+            | WezTerm ->
+                UseTextFallback "WezTerm terminal graphics require explicit opt-in with LFSX_TERMINAL_GRAPHICS=kitty."
+            | ITerm2 ->
+                UseTextFallback "iTerm2 graphics require the OSC1337 backend."
+            | UnknownTerminal ->
+                UseTextFallback "No supported terminal graphics protocol was detected."

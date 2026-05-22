@@ -188,9 +188,19 @@ type NotebookWindow(path: string) as this =
 
         let headerOptions = { DirtyIndicator = StarWhenDirty }
         let visualOutputService = ChromeCdpVisualOutputService()
-        let visualOutputCache = MemoryVisualOutputCache(visualOutputService)
-        let imageBackend = KittyImageBackend()
-        let terminalImageLayer = imageBackend :> ITerminalImageLayer
+        let visualOutputCache = MemoryVisualOutputCache visualOutputService
+
+        let imageBackend, terminalImageLayer =
+            match TerminalGraphics.currentEnvironment () |> TerminalGraphics.decide with
+            | UseTerminalGraphics Kitty ->
+                let backend = KittyImageBackend()
+                backend :> ITerminalImageBackend, backend :> ITerminalImageLayer
+            | UseTerminalGraphics protocol ->
+                let backend = FallbackTerminalImageBackend protocol
+                backend :> ITerminalImageBackend, backend :> ITerminalImageLayer
+            | UseTextFallback reason ->
+                let backend = FallbackTerminalImageBackend(Kitty, reason)
+                backend :> ITerminalImageBackend, backend :> ITerminalImageLayer
 
         let selectedBrush = SolidColorBrush(Color.FromRgb(38uy, 72uy, 118uy))
         let errorBrush = SolidColorBrush(Color.FromRgb(255uy, 150uy, 150uy))
