@@ -14,6 +14,7 @@
 
   <ItemGroup>
     <PackageReference Include="FSharp.Formatting" Version="22.0.0" />
+    <PackageReference Include="Microsoft.DotNet.Interactive.Formatting" Version="1.0.0-beta.26120.1" />
   </ItemGroup>
 
 </Project>

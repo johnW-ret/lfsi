@@ -5,6 +5,7 @@ open System.Diagnostics
 open System.Text
 open System.Threading
 open System.Threading.Tasks
+open Microsoft.DotNet.Interactive.Formatting
 
 type FsiExecution =
     { Input: string
@@ -23,13 +24,25 @@ type FsiSession(?workingDirectory: string) =
 
     let workingDirectory = defaultArg workingDirectory Environment.CurrentDirectory
 
+    let escapedAssemblyPath (path: string) =
+        path.Replace("\\", "\\\\").Replace("\"", "\\\"")
+
     let displayHelpers =
-        """
+        let formattingAssemblyPath =
+            typeof<Formatter>.Assembly.Location
+            |> escapedAssemblyPath
+
+        String.concat
+            Environment.NewLine
+            [ "#r \"" + formattingAssemblyPath + "\""
+              ""
+              """
 module Lfsx =
     open System
     open System.IO
     open System.Reflection
     open System.Text
+    open Microsoft.DotNet.Interactive.Formatting
 
     let private emitEncodedMime (mime: string) (encoded: string) =
         printfn "__LFSX_MIME_BEGIN__%s" mime
@@ -48,66 +61,180 @@ module Lfsx =
     let plotlyJson (value: string) = display "application/vnd.plotly.v1+json" value
     let pngBase64 (value: string) = emitEncodedMime "image/png" value
 
-    let private hasInterface interfaceName (valueType: Type) =
-        valueType.GetInterfaces()
-        |> Array.tryFind (fun interfaceType -> interfaceType.FullName = interfaceName)
+    let private isRelevantFormatterType (valueType: Type) (formatterType: Type) =
+        formatterType.IsAssignableFrom(valueType)
 
-    let private tryInvokeHtmlMethod (value: obj) =
-        let valueType = value.GetType()
-        let chartType =
-            if not (isNull valueType.BaseType) && valueType.BaseType.FullName = "Plotly.NET.GenericChart" then
-                valueType.BaseType
-            else
-                valueType
+    let private tryFormatWithFormatterObject (value: obj) (formatter: obj) =
+        try
+            let formatterType = formatter.GetType()
+            let mimeType =
+                match formatterType.GetProperty("MimeType") with
+                | null -> None
+                | property ->
+                    match property.GetValue(formatter) with
+                    | :? string as value -> Some value
+                    | _ -> None
 
-        let htmlMethod name =
-            chartType.GetMethods(BindingFlags.Public ||| BindingFlags.Static)
-            |> Array.tryFind (fun method ->
-                method.Name = name
-                && method.ReturnType = typeof<string>
-                && method.GetParameters().Length = 1
-                && method.GetParameters().[0].ParameterType.IsAssignableFrom(valueType))
-
-        htmlMethod "toEmbeddedHTML"
-        |> Option.orElseWith (fun () -> htmlMethod "toChartHTML")
-        |> Option.map (fun method -> method.Invoke(null, [| value |]) :?> string)
-
-    let private tryRenderHtmlContent (value: obj) =
-        let valueType = value.GetType()
-
-        match hasInterface "Microsoft.AspNetCore.Html.IHtmlContent" valueType with
-        | Some htmlContent ->
-            let writeTo = htmlContent.GetMethod("WriteTo")
-            let encoderType = Type.GetType("System.Text.Encodings.Web.HtmlEncoder, System.Text.Encodings.Web")
-
-            if isNull writeTo || isNull encoderType then
+            if mimeType <> Some "text/html" then
                 None
             else
-                let defaultEncoder = encoderType.GetProperty("Default").GetValue(null)
-                use writer = new StringWriter()
-                writeTo.Invoke(value, [| writer :> obj; defaultEncoder |]) |> ignore
-                Some(writer.ToString())
-        | None -> None
+                let valueType = value.GetType()
+                let formatterTargetType =
+                    match formatterType.GetProperty("Type") with
+                    | null -> None
+                    | property ->
+                        match property.GetValue(formatter) with
+                        | :? Type as value -> Some value
+                        | _ -> None
+
+                match formatterTargetType with
+                | Some targetType when not (isRelevantFormatterType valueType targetType) -> None
+                | _ ->
+                    let formatMethod =
+                        formatterType.GetMethods(BindingFlags.Public ||| BindingFlags.Instance)
+                        |> Array.tryFind (fun method ->
+                            method.Name = "Format"
+                            && method.GetParameters().Length = 2
+                            && method.GetParameters().[0].ParameterType.IsAssignableFrom(valueType)
+                            && method.GetParameters().[1].ParameterType.IsAssignableFrom(typeof<TextWriter>))
+
+                    match formatMethod with
+                    | Some method ->
+                        use writer = new StringWriter()
+
+                        match method.Invoke(formatter, [| value; writer :> obj |]) with
+                        | :? bool as handled when handled -> Some(writer.ToString())
+                        | null -> Some(writer.ToString())
+                        | _ -> None
+                    | None -> None
+        with _ ->
+            None
+
+    let private typeHierarchy (valueType: Type) =
+        Seq.unfold
+            (fun (current: Type) ->
+                if isNull current then
+                    None
+                else
+                    Some(current, current.BaseType))
+            valueType
+
+    let private formatterSources (valueType: Type) =
+        typeHierarchy valueType
+        |> Seq.collect (fun candidateType -> candidateType.GetCustomAttributes(true))
+        |> Seq.choose (fun attribute ->
+            let attributeType = attribute.GetType()
+
+            if attributeType.FullName = "Microsoft.DotNet.Interactive.Formatting.TypeFormatterSourceAttribute"
+               || attributeType.Name = "TypeFormatterSourceAttribute" then
+                match attributeType.GetProperty("FormatterSourceType") with
+                | null -> None
+                | property ->
+                    match property.GetValue(attribute) with
+                    | :? Type as formatterSourceType -> Some formatterSourceType
+                    | _ -> None
+            else
+                None)
+
+    let private tryFormatWithFormatterSources (value: obj) =
+        let valueType = value.GetType()
+
+        formatterSources valueType
+        |> Seq.tryPick (fun formatterSourceType ->
+            try
+                let source = Activator.CreateInstance(formatterSourceType)
+                let createFormatters = formatterSourceType.GetMethod("CreateTypeFormatters")
+
+                if isNull createFormatters then
+                    None
+                else
+                    match createFormatters.Invoke(source, Array.empty) with
+                    | :? System.Collections.IEnumerable as formatters ->
+                        formatters
+                        |> Seq.cast<obj>
+                        |> Seq.tryPick (tryFormatWithFormatterObject value)
+                    | _ -> None
+            with _ ->
+                None)
+
+    let private tryInvokeHtmlMethod (target: obj option) (method: MethodInfo) (value: obj) =
+        try
+            let parameters = method.GetParameters()
+            let valueType = value.GetType()
+
+            if method.ReturnType <> typeof<string> then
+                None
+            elif parameters.Length = 0 && target.IsSome then
+                method.Invoke(target.Value, Array.empty) :?> string |> Some
+            elif parameters.Length = 1 && parameters.[0].ParameterType.IsAssignableFrom(valueType) then
+                method.Invoke(null, [| value |]) :?> string |> Some
+            else
+                None
+        with _ ->
+            None
+
+    let private isHtmlMethodName (name: string) =
+        [ "toEmbeddedHTML"
+          "toChartHTML"
+          "toHTML"
+          "toHtml"
+          "ToHtml"
+          "ToHTML" ]
+        |> List.exists (fun candidate -> String.Equals(candidate, name, StringComparison.Ordinal))
+
+    let private tryFormatWithHtmlMethod (value: obj) =
+        let valueType = value.GetType()
+
+        let staticHtml =
+            typeHierarchy valueType
+            |> Seq.collect (fun candidateType ->
+                candidateType.GetMethods(BindingFlags.Public ||| BindingFlags.Static))
+            |> Seq.filter (fun method -> isHtmlMethodName method.Name)
+            |> Seq.tryPick (fun method -> tryInvokeHtmlMethod None method value)
+
+        staticHtml
+        |> Option.orElseWith (fun () ->
+            valueType.GetMethods(BindingFlags.Public ||| BindingFlags.Instance)
+            |> Seq.filter (fun method -> isHtmlMethodName method.Name)
+            |> Seq.tryPick (fun method -> tryInvokeHtmlMethod (Some value) method value))
+
+    let private tryFormatWithRegisteredFormatter (value: obj) =
+        let valueType = value.GetType()
+
+        try
+            Formatter.GetPreferredMimeTypesFor(valueType) |> ignore
+
+            Formatter.RegisteredFormatters(false)
+            |> Seq.tryPick (fun formatter ->
+                let handlesValue =
+                    formatter.MimeType = "text/html"
+                    && formatter.Type.IsAssignableFrom(valueType)
+
+                if handlesValue then
+                    try
+                        Some(Formatter.ToDisplayString(value, "text/html"))
+                    with _ ->
+                        None
+                else
+                    None)
+        with _ ->
+            None
+
+    let private tryFormatHtml (value: obj) =
+        tryFormatWithRegisteredFormatter value
+        |> Option.orElseWith (fun () -> tryFormatWithFormatterSources value)
+        |> Option.orElseWith (fun () -> tryFormatWithHtmlMethod value)
 
     let tryDisplayValue (value: obj) =
         if isNull value then
             false
         else
-            let valueType = value.GetType()
-
-            let htmlOutput =
-                if valueType.FullName = "Plotly.NET.GenericChart"
-                   || (not (isNull valueType.BaseType) && valueType.BaseType.FullName = "Plotly.NET.GenericChart") then
-                    tryInvokeHtmlMethod value
-                else
-                    tryRenderHtmlContent value
-
-            match htmlOutput with
+            match tryFormatHtml value with
             | Some value ->
                 html value
                 true
             | None -> false
-"""
+""" ]
 
     let startInfo =
         ProcessStartInfo(
@@ -273,68 +400,79 @@ module Lfsx =
                 do! proc.StandardInput.WriteLineAsync(";;")
                 do! proc.StandardInput.FlushAsync()
 
-                let! _ = executeAndCollect helperMarker cancellationToken
+                let! helperFinished, _, helperErr = executeAndCollect helperMarker cancellationToken
                 snapshotAndClear () |> ignore
 
-                do! proc.StandardInput.WriteLineAsync(code)
-                do! proc.StandardInput.WriteLineAsync(";;")
-                do! proc.StandardInput.WriteLineAsync("let " + markerBinding marker)
-                do! proc.StandardInput.WriteLineAsync(";;")
-                do! proc.StandardInput.FlushAsync()
-
-                let! finished, outText, errText = executeAndCollect marker cancellationToken
-
-                if finished then
-                    let cleaned = cleanOutput marker outText
-
-                    if String.IsNullOrWhiteSpace errText then
-                        match tryParseMimeEnvelope cleaned with
-                        | None when hasFsiItValue cleaned ->
-                            let displayMarker = "__LFSX_DISPLAY_END_" + Guid.NewGuid().ToString("N") + "__"
-                            snapshotAndClear () |> ignore
-                            do! proc.StandardInput.WriteLineAsync("Lfsx.tryDisplayValue (box it) |> ignore")
-                            do! proc.StandardInput.WriteLineAsync(";;")
-                            do! proc.StandardInput.WriteLineAsync("let " + markerBinding displayMarker)
-                            do! proc.StandardInput.WriteLineAsync(";;")
-                            do! proc.StandardInput.FlushAsync()
-
-                            let! displayFinished, displayOut, displayErr =
-                                executeAndCollect displayMarker cancellationToken
-
-                            let displayCleaned = cleanOutput displayMarker displayOut
-
-                            if displayFinished && String.IsNullOrWhiteSpace displayErr then
-                                match tryParseMimeEnvelope displayCleaned with
-                                | Some richOutput ->
-                                    return
-                                        { Input = code
-                                          Output = richOutput }
-                                | None ->
-                                    return
-                                        { Input = code
-                                          Output = inferOutput cleaned }
-                            else
-                                return
-                                    { Input = code
-                                      Output = inferOutput cleaned }
-                        | _ ->
-                            return
-                                { Input = code
-                                  Output = inferOutput cleaned }
-                    else
-                        return
-                            { Input = code
-                              Output = NotebookOutput.Error(errText.Trim()) }
-                else
+                if not helperFinished || not (String.IsNullOrWhiteSpace helperErr) then
                     let text =
-                        if String.IsNullOrWhiteSpace errText then
-                            outText
+                        if String.IsNullOrWhiteSpace helperErr then
+                            "Timed out waiting for fsi display helper."
                         else
-                            errText
+                            helperErr.Trim()
 
                     return
                         { Input = code
-                          Output = NotebookOutput.Error("Timed out waiting for fsi output.\n" + text.Trim()) }
+                          Output = NotebookOutput.Error("Failed to initialize fsi display helper.\n" + text) }
+                else
+                    do! proc.StandardInput.WriteLineAsync(code)
+                    do! proc.StandardInput.WriteLineAsync(";;")
+                    do! proc.StandardInput.WriteLineAsync("let " + markerBinding marker)
+                    do! proc.StandardInput.WriteLineAsync(";;")
+                    do! proc.StandardInput.FlushAsync()
+
+                    let! finished, outText, errText = executeAndCollect marker cancellationToken
+
+                    if finished then
+                        let cleaned = cleanOutput marker outText
+
+                        if String.IsNullOrWhiteSpace errText then
+                            match tryParseMimeEnvelope cleaned with
+                            | None when hasFsiItValue cleaned ->
+                                let displayMarker = "__LFSX_DISPLAY_END_" + Guid.NewGuid().ToString("N") + "__"
+                                snapshotAndClear () |> ignore
+                                do! proc.StandardInput.WriteLineAsync("Lfsx.tryDisplayValue (box it) |> ignore")
+                                do! proc.StandardInput.WriteLineAsync(";;")
+                                do! proc.StandardInput.WriteLineAsync("let " + markerBinding displayMarker)
+                                do! proc.StandardInput.WriteLineAsync(";;")
+                                do! proc.StandardInput.FlushAsync()
+
+                                let! displayFinished, displayOut, displayErr =
+                                    executeAndCollect displayMarker cancellationToken
+
+                                let displayCleaned = cleanOutput displayMarker displayOut
+
+                                if displayFinished && String.IsNullOrWhiteSpace displayErr then
+                                    match tryParseMimeEnvelope displayCleaned with
+                                    | Some richOutput ->
+                                        return
+                                            { Input = code
+                                              Output = richOutput }
+                                    | None ->
+                                        return
+                                            { Input = code
+                                              Output = inferOutput cleaned }
+                                else
+                                    return
+                                        { Input = code
+                                          Output = inferOutput cleaned }
+                            | _ ->
+                                return
+                                    { Input = code
+                                      Output = inferOutput cleaned }
+                        else
+                            return
+                                { Input = code
+                                  Output = NotebookOutput.Error(errText.Trim()) }
+                    else
+                        let text =
+                            if String.IsNullOrWhiteSpace errText then
+                                outText
+                            else
+                                errText
+
+                        return
+                            { Input = code
+                              Output = NotebookOutput.Error("Timed out waiting for fsi output.\n" + text.Trim()) }
         }
 
     interface IFsiSession with
