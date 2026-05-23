@@ -60,11 +60,6 @@ module NotebookOutput =
             { MimeType = MimeTypes.PlotlyJson
               Payload = TextPayload value }
 
-    let isError output =
-        match output with
-        | Error _ -> true
-        | Display _ -> false
-
 type NotebookCell =
     { Id: Guid
       Kind: CellKind

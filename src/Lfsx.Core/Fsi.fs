@@ -90,31 +90,19 @@ type FsiSession(?workingDirectory: string) =
     let mimePayload mimeType (encoded: string) =
         try
             let bytes = Convert.FromBase64String(encoded.Trim())
+            let decodeText () = Encoding.UTF8.GetString(bytes)
 
             match mimeType with
-            | MimeTypes.Png -> Some(NotebookOutput.png bytes)
-            | MimeTypes.Text ->
-                Encoding.UTF8.GetString(bytes)
-                |> NotebookOutput.text
-                |> Some
-            | MimeTypes.Html ->
-                Encoding.UTF8.GetString(bytes)
-                |> NotebookOutput.html
-                |> Some
-            | MimeTypes.Svg ->
-                Encoding.UTF8.GetString(bytes)
-                |> NotebookOutput.svg
-                |> Some
-            | MimeTypes.PlotlyJson ->
-                Encoding.UTF8.GetString(bytes)
-                |> NotebookOutput.plotlyJson
-                |> Some
+            | MimeTypes.Png -> NotebookOutput.png bytes
+            | MimeTypes.Text -> NotebookOutput.text (decodeText ())
+            | MimeTypes.Html -> NotebookOutput.html (decodeText ())
+            | MimeTypes.Svg -> NotebookOutput.svg (decodeText ())
+            | MimeTypes.PlotlyJson -> NotebookOutput.plotlyJson (decodeText ())
             | _ ->
-                Some(
-                    NotebookOutput.Display
-                        { MimeType = mimeType
-                          Payload = BinaryPayload bytes }
-                )
+                NotebookOutput.Display
+                    { MimeType = mimeType
+                      Payload = BinaryPayload bytes }
+            |> Some
         with _ ->
             None
 

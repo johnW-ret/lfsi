@@ -7,7 +7,24 @@ open System.Text
 open System.Threading.Tasks
 open Microsoft.DotNet.Interactive.Formatting
 
+type MimeType =
+    | Text
+    | Html
+    | Png
+    | Svg
+    | PlotlyJson
+    | Custom of string
+
 module Display =
+
+    let mimeTypeValue =
+        function
+        | Text -> "text/plain"
+        | Html -> "text/html"
+        | Png -> "image/png"
+        | Svg -> "image/svg+xml"
+        | PlotlyJson -> "application/vnd.plotly.v1+json"
+        | Custom v -> v
 
     // ── Output helpers ──────────────────────────────────────────────
 
@@ -16,17 +33,18 @@ module Display =
         printfn "%s" encoded
         printfn "__LFSX_MIME_END__"
 
-    let display (mime: string) (value: string) =
+    let display (mime: MimeType) (value: string) =
         value
         |> Encoding.UTF8.GetBytes
         |> Convert.ToBase64String
-        |> emitEncodedMime mime
+        |> emitEncodedMime (mimeTypeValue mime)
 
-    let text (value: string) = display "text/plain" value
-    let html (value: string) = display "text/html" value
-    let svg (value: string) = display "image/svg+xml" value
-    let plotlyJson (value: string) = display "application/vnd.plotly.v1+json" value
-    let pngBase64 (value: string) = emitEncodedMime "image/png" value
+    let text = display Text
+    let html = display Html
+    let svg = display Svg
+    let plotlyJson = display PlotlyJson
+    let png (bytes: byte[]) = display Png (Convert.ToBase64String bytes)
+    let pngBase64 (value: string) = emitEncodedMime (mimeTypeValue Png) value
 
     // ── Rich-value formatting ───────────────────────────────────────
 
