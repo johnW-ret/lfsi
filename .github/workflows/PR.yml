@@ -1,0 +1,27 @@
+name: PR
+
+on:
+  pull_request:
+    branches:
+      - main
+      - feature/*
+      - fix/*
+      - refactor/*
+      - docs/*
+      - chore/*
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - run: dotnet tool restore
+      - run: dotnet fantomas --check .
+
+      - run: dotnet build src/Lfsx.App/Lfsx.App.fsproj
