@@ -157,47 +157,6 @@ module Lfsx =
             with _ ->
                 None)
 
-    let private tryInvokeHtmlMethod (target: obj option) (method: MethodInfo) (value: obj) =
-        try
-            let parameters = method.GetParameters()
-            let valueType = value.GetType()
-
-            if method.ReturnType <> typeof<string> then
-                None
-            elif parameters.Length = 0 && target.IsSome then
-                method.Invoke(target.Value, Array.empty) :?> string |> Some
-            elif parameters.Length = 1 && parameters.[0].ParameterType.IsAssignableFrom(valueType) then
-                method.Invoke(null, [| value |]) :?> string |> Some
-            else
-                None
-        with _ ->
-            None
-
-    let private isHtmlMethodName (name: string) =
-        [ "toEmbeddedHTML"
-          "toChartHTML"
-          "toHTML"
-          "toHtml"
-          "ToHtml"
-          "ToHTML" ]
-        |> List.exists (fun candidate -> String.Equals(candidate, name, StringComparison.Ordinal))
-
-    let private tryFormatWithHtmlMethod (value: obj) =
-        let valueType = value.GetType()
-
-        let staticHtml =
-            typeHierarchy valueType
-            |> Seq.collect (fun candidateType ->
-                candidateType.GetMethods(BindingFlags.Public ||| BindingFlags.Static))
-            |> Seq.filter (fun method -> isHtmlMethodName method.Name)
-            |> Seq.tryPick (fun method -> tryInvokeHtmlMethod None method value)
-
-        staticHtml
-        |> Option.orElseWith (fun () ->
-            valueType.GetMethods(BindingFlags.Public ||| BindingFlags.Instance)
-            |> Seq.filter (fun method -> isHtmlMethodName method.Name)
-            |> Seq.tryPick (fun method -> tryInvokeHtmlMethod (Some value) method value))
-
     let private tryFormatWithRegisteredFormatter (value: obj) =
         let valueType = value.GetType()
 
@@ -220,10 +179,49 @@ module Lfsx =
         with _ ->
             None
 
+    let private tryLoadExtensions () =
+        let extensionInterfaceName = "Microsoft.DotNet.Interactive.IKernelExtension"
+        let onLoadAsyncName = "Microsoft.DotNet.Interactive.IKernelExtension.OnLoadAsync"
+
+        for asm in System.AppDomain.CurrentDomain.GetAssemblies() do
+            try
+                for t in asm.GetExportedTypes() do
+                    let iface = t.GetInterface(extensionInterfaceName)
+                    if not (isNull iface) then
+                        let onLoadAsync = t.GetMethod(onLoadAsyncName, BindingFlags.Instance ||| BindingFlags.Public ||| BindingFlags.NonPublic)
+                        if not (isNull onLoadAsync) then
+                            let ext = System.Activator.CreateInstance(t)
+                            let task = onLoadAsync.Invoke(ext, [| null |]) :?> System.Threading.Tasks.Task
+                            task.Wait()
+            with _ ->
+                ()
+
+        for asm in System.AppDomain.CurrentDomain.GetAssemblies() do
+            let name = asm.GetName().Name
+            if not (isNull name) then
+                for candidateName in [ name + ".Interactive"; name + ".DotNetInteractive" ] do
+                    try
+                        let candidateAsm = System.Reflection.Assembly.Load(candidateName)
+                        for t in candidateAsm.GetExportedTypes() do
+                            let iface = t.GetInterface(extensionInterfaceName)
+                            if not (isNull iface) then
+                                let onLoadAsync = t.GetMethod(onLoadAsyncName, BindingFlags.Instance ||| BindingFlags.Public ||| BindingFlags.NonPublic)
+                                if not (isNull onLoadAsync) then
+                                    let ext = System.Activator.CreateInstance(t)
+                                    let task = onLoadAsync.Invoke(ext, [| null |]) :?> System.Threading.Tasks.Task
+                                    task.Wait()
+                    with _ ->
+                        ()
+
+    let mutable private _extensionsLoaded = false
+
     let private tryFormatHtml (value: obj) =
+        if not _extensionsLoaded then
+            _extensionsLoaded <- true
+            tryLoadExtensions ()
+
         tryFormatWithRegisteredFormatter value
         |> Option.orElseWith (fun () -> tryFormatWithFormatterSources value)
-        |> Option.orElseWith (fun () -> tryFormatWithHtmlMethod value)
 
     let tryDisplayValue (value: obj) =
         if isNull value then

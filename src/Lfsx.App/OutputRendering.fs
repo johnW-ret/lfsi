@@ -89,7 +89,7 @@ module ChromeDiscovery =
 type ChromeCdpVisualOutputService(?chromePath: string, ?viewportWidth: int, ?viewportHeight: int) =
     let chromePath = defaultArg chromePath (ChromeDiscovery.defaultChromePath ())
     let viewportWidth = defaultArg viewportWidth 900
-    let viewportHeight = defaultArg viewportHeight 520
+    let viewportHeight = defaultArg viewportHeight 2000
 
     let htmlDocument (html: string) =
         if html.Contains("<html", StringComparison.OrdinalIgnoreCase) then
