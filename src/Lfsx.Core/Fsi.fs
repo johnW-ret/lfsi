@@ -231,7 +231,7 @@ type FsiSession(?workingDirectory: string) =
                             | None when hasFsiItValue cleaned ->
                                 let displayMarker = "__LFSX_DISPLAY_END_" + Guid.NewGuid().ToString("N") + "__"
                                 snapshotAndClear () |> ignore
-                                do! proc.StandardInput.WriteLineAsync("Lfsx.tryDisplayValue (box it) |> ignore")
+                                do! proc.StandardInput.WriteLineAsync("Display.tryDisplayValue (box it) |> ignore")
                                 do! proc.StandardInput.WriteLineAsync(";;")
                                 do! proc.StandardInput.WriteLineAsync("let " + markerBinding displayMarker)
                                 do! proc.StandardInput.WriteLineAsync(";;")
