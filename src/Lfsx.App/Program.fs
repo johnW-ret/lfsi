@@ -68,6 +68,64 @@ type NotebookWindow(path: string) as this =
             directory
 
     let fsi = new FsiSession(fsiWorkingDirectory)
+
+    let findFsAutocompleteDll () =
+        let tryFind root =
+            let storeDir = Path.Combine(root, ".dotnet/.dotnet/tools/.store/fsautocomplete")
+
+            if Directory.Exists storeDir then
+                let dlls =
+                    Directory.GetFiles(storeDir, "fsautocomplete.dll", SearchOption.AllDirectories)
+
+                dlls
+                |> Array.tryFind (fun p -> p.Contains("net10.0"))
+                |> Option.orElseWith (fun () -> dlls |> Array.tryHead)
+            else
+                None
+
+        let rec findRoot dir =
+            if
+                Directory.Exists(Path.Combine(dir, ".git"))
+                || File.Exists(Path.Combine(dir, "dotnet-tools.json"))
+            then
+                Some dir
+            else
+                let parent = Directory.GetParent(dir)
+                if parent = null then None else findRoot parent.FullName
+
+        let directSearches =
+            [ Path.Combine(
+                  Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                  ".dotnet/.dotnet/tools/.store/fsautocomplete"
+              ) ]
+
+        [ findRoot fsiWorkingDirectory
+          findRoot AppContext.BaseDirectory
+          findRoot Environment.CurrentDirectory ]
+        |> List.choose id
+        |> List.map (fun root -> Path.Combine(root, ".dotnet/.dotnet/tools/.store/fsautocomplete"))
+        |> List.append directSearches
+        |> List.tryFind Directory.Exists
+        |> Option.map (fun storeDir ->
+            let dlls =
+                Directory.GetFiles(storeDir, "fsautocomplete.dll", SearchOption.AllDirectories)
+
+            dlls
+            |> Array.tryFind (fun p -> p.Contains("net10.0"))
+            |> Option.orElseWith (fun () -> dlls |> Array.tryHead))
+        |> Option.flatten
+
+    let lspClient: LspClient option =
+        match findFsAutocompleteDll () with
+        | Some dll ->
+            try
+                let client = new LspClient(fsiWorkingDirectory, dll)
+                client.StartAsync() |> ignore
+                Some client
+            with _ ->
+                None
+        | None -> None
+
     let quitConfirmationMessage = "Press Ctrl+C again to quit, or Esc to cancel."
     let mutable parsed = initialParsed
     let mutable lastWriteTimeUtc = initialWriteTimeUtc
@@ -79,14 +137,143 @@ type NotebookWindow(path: string) as this =
     let mutable isRunning = false
     let mutable hasExternalChanges = false
     let mutable selectedEditor: TextBox option = None
+    let mutable allCompletionItems: CompletionItem[] = [||]
+    let mutable completionItems: CompletionItem[] = [||]
+    let mutable showCompletionList = false
+    let mutable completionSelectedIndex = 0
+    let mutable completionPanel: StackPanel option = None
+    let mutable completionScrollerRef: ScrollViewer option = None
+    let mutable mutableSetStatus: (string -> unit) option = None
+    let mutable completionFilterStart = 0
+
+    let dismissCompletions () =
+        showCompletionList <- false
+        completionSelectedIndex <- 0
+        completionItems <- [||]
+        allCompletionItems <- [||]
+        completionPanel |> Option.iter (fun panel -> panel.IsVisible <- false)
+        completionScrollerRef |> Option.iter (fun s -> s.IsVisible <- false)
+        mutableSetStatus |> Option.iter (fun s -> s ("Ready"))
+
+    let updateCompletionVisual () =
+        completionPanel
+        |> Option.iter (fun panel ->
+            for i in 0 .. panel.Children.Count - 1 do
+                match panel.Children[i] with
+                | :? TextBlock as tb ->
+                    if i = completionSelectedIndex then
+                        tb.Background <- SolidColorBrush(Color.FromRgb(60uy, 62uy, 68uy))
+                        tb.Foreground <- SolidColorBrush(Colors.White)
+                    else
+                        tb.Background <- SolidColorBrush(Color.FromRgb(30uy, 32uy, 38uy))
+                        tb.Foreground <- SolidColorBrush(Color.FromRgb(200uy, 200uy, 200uy))
+                | _ -> ()
+
+            completionScrollerRef
+            |> Option.iter (fun s -> s.Offset <- Vector(s.Offset.X, float completionSelectedIndex)))
+
+    let acceptCompletion () =
+        if showCompletionList && completionSelectedIndex < completionItems.Length then
+            let item = completionItems[completionSelectedIndex]
+            let insertText = Option.defaultValue item.Label item.InsertText
+
+            selectedEditor
+            |> Option.iter (fun editor ->
+                let caretPos = editor.CaretIndex
+                let text = editor.Text
+                let textBefore = text.Substring(0, caretPos)
+                let textAfter = text.Substring(caretPos)
+                let dotPos = textBefore.LastIndexOf('.')
+
+                let newText =
+                    if dotPos >= 0 then
+                        textBefore.Substring(0, dotPos + 1) + insertText + textAfter
+                    else
+                        textBefore + insertText + textAfter
+
+                let newCaret =
+                    if dotPos >= 0 then
+                        dotPos + 1 + insertText.Length
+                    else
+                        caretPos + insertText.Length
+
+                editor.Text <- newText
+                editor.CaretIndex <- newCaret)
+
+        dismissCompletions ()
+
+    let poplateCompletionPanel (items: CompletionItem[]) =
+        allCompletionItems <- items
+        completionItems <- items
+
+        if items.Length > 0 then
+            showCompletionList <- true
+            completionSelectedIndex <- 0
+
+            mutableSetStatus
+            |> Option.iter (fun s -> s (sprintf "%d completions (↑↓ select, Enter accept)" items.Length))
+
+            completionPanel
+            |> Option.iter (fun panel ->
+                panel.Children.Clear()
+
+                for item in items do
+                    let detail = item.Detail |> Option.map (sprintf "  (%s)") |> Option.defaultValue ""
+
+                    panel.Children.Add(
+                        TextBlock(
+                            Text = item.Label + detail,
+                            Foreground = SolidColorBrush(Color.FromRgb(200uy, 200uy, 200uy)),
+                            Background = SolidColorBrush(Color.FromRgb(30uy, 32uy, 38uy))
+                        )
+                    )
+                    |> ignore
+
+                panel.IsVisible <- true
+
+                completionScrollerRef
+                |> Option.iter (fun s ->
+                    s.IsVisible <- true
+                    s.ScrollToHome()))
+        else
+            dismissCompletions ()
+
+    let triggerCompletions (text: string) (caretIndex: int) =
+        match lspClient with
+        | Some client ->
+            task {
+                try
+                    do! client.WaitForInitAsync()
+                    // send didChange in the same task so the server processes it before completion
+                    client.ChangeDocument(text)
+                    let! items = client.RequestCompletionsAsync(text, caretIndex)
+                    do! Dispatcher.UIThread.InvokeAsync(fun () -> poplateCompletionPanel items)
+                with ex ->
+                    do!
+                        Dispatcher.UIThread.InvokeAsync(fun () ->
+                            poplateCompletionPanel
+                                [| { Label = "LSP error: " + ex.Message
+                                     InsertText = None
+                                     Detail = None
+                                     Kind = None } |])
+            }
+            |> ignore
+        | None ->
+            poplateCompletionPanel
+                [| { Label = "no LSP - install fsautocomplete"
+                     InsertText = None
+                     Detail = None
+                     Kind = None }
+                   { Label = "press F5 to run cells"
+                     InsertText = None
+                     Detail = None
+                     Kind = None } |]
 
     let formattingStatus () =
         if parsed.FormattingDiagnostics.IsEmpty then
             "FSharp.Formatting parse: ok"
         else
             "FSharp.Formatting parse: " + String.concat "; " parsed.FormattingDiagnostics
-
-    let restoreStatus (status: TextBlock) = status.Text <- formattingStatus ()
 
     let cellKindLabel kind =
         match kind with
@@ -168,7 +355,68 @@ type NotebookWindow(path: string) as this =
                 MinHeight = 3.0
             )
 
-        editor.TextChanged.Add(fun _ -> onTextChanged cell.Source editor.Text)
+        let mutable previousText = cell.Source
+
+        editor.TextChanged.Add(fun _ ->
+            let newText = editor.Text
+
+            let willTrigger =
+                newText.Length > previousText.Length
+                && (newText[newText.Length - 1] = '.' || newText[newText.Length - 1] = '\'')
+
+            // defer didChange to triggerCompletions when we will request completions
+            if not willTrigger then
+                lspClient |> Option.iter (fun client -> client.ChangeDocument(newText))
+
+            if willTrigger then
+                completionFilterStart <- newText.Length
+                triggerCompletions newText (editor.CaretIndex)
+            elif showCompletionList && allCompletionItems.Length > 0 then
+                let filterStart = min completionFilterStart newText.Length
+                let filterText = newText.Substring(filterStart).ToLowerInvariant()
+
+                let filtered =
+                    allCompletionItems
+                    |> Array.filter (fun item -> item.Label.ToLowerInvariant().Contains(filterText))
+
+                poplateCompletionPanel filtered
+
+            previousText <- newText
+            onTextChanged cell.Source newText)
+
+        editor.AddHandler(
+            InputElement.KeyDownEvent,
+            (fun _ args ->
+                if showCompletionList then
+                    match args.Key with
+                    | Key.Down ->
+                        args.Handled <- true
+
+                        completionSelectedIndex <-
+                            Math.Clamp(completionSelectedIndex + 1, 0, completionItems.Length - 1)
+
+                        updateCompletionVisual ()
+                    | Key.Up ->
+                        args.Handled <- true
+
+                        completionSelectedIndex <-
+                            Math.Clamp(completionSelectedIndex - 1, 0, completionItems.Length - 1)
+
+                        updateCompletionVisual ()
+                    | Key.Enter ->
+                        args.Handled <- true
+                        acceptCompletion ()
+                    | Key.Escape ->
+                        args.Handled <- true
+                        dismissCompletions ()
+                    | Key.Tab ->
+                        args.Handled <- true
+                        acceptCompletion ()
+                    | _ -> ()),
+            RoutingStrategies.Bubble,
+            true
+        )
+
         body.Children.Add(editor) |> ignore
         addCellOutputs theme errorBrush visualOutputCache imageBackend body cell
 
@@ -228,7 +476,7 @@ type NotebookWindow(path: string) as this =
 
         let selectedBrush = SolidColorBrush(Color.FromRgb(38uy, 72uy, 118uy))
         let errorBrush = SolidColorBrush(Color.FromRgb(255uy, 150uy, 150uy))
-        let root = DockPanel(Background = theme.Dark)
+        let root = Grid(Background = theme.Dark)
         let header = DockPanel(Background = theme.Dark)
 
         let headerText =
@@ -237,7 +485,17 @@ type NotebookWindow(path: string) as this =
         let dirtyIndicator =
             TextBlock(Foreground = theme.Accent, Background = theme.Dark, Text = "")
 
-        let status =
+        let lspText = if lspClient.IsSome then "LSP" else "noLSP"
+
+        let lspColor =
+            if lspClient.IsSome then
+                SolidColorBrush(Color.FromRgb(100uy, 200uy, 100uy))
+            else
+                theme.Muted
+
+        let status = DockPanel(Background = theme.Dark)
+
+        let statusText =
             TextBlock(
                 Text = formattingStatus (),
                 Foreground = theme.Muted,
@@ -245,7 +503,15 @@ type NotebookWindow(path: string) as this =
                 TextWrapping = TextWrapping.Wrap
             )
 
-        let setStatus message = status.Text <- message
+        let lspDot =
+            TextBlock(Text = lspText, Foreground = lspColor, Background = theme.Dark)
+
+        DockPanel.SetDock(lspDot, Dock.Right)
+        status.Children.Add(lspDot) |> ignore
+        status.Children.Add(statusText) |> ignore
+
+        let setStatus message = statusText.Text <- message
+        mutableSetStatus <- Some setStatus
 
         let quit () =
             match Application.Current.ApplicationLifetime with
@@ -269,7 +535,7 @@ type NotebookWindow(path: string) as this =
 
         let cancelQuitConfirmation () =
             quitConfirmation <- Hidden
-            restoreStatus status
+            setStatus (formattingStatus ())
 
         let applySelectedEdit () =
             selectedEditor
@@ -395,6 +661,13 @@ type NotebookWindow(path: string) as this =
         let beginEditing () =
             if not cells.IsEmpty && not isEditing && not isRunning then
                 isEditing <- true
+
+                // open document before rebuild so TextChanged can't race ahead
+                lspClient
+                |> Option.iter (fun client ->
+                    let cell = cells[selectedIndex]
+                    client.OpenDocument(cell.Source))
+
                 rebuildCells ()
 
         let reloadFromDisk message =
@@ -458,6 +731,7 @@ type NotebookWindow(path: string) as this =
         let endEditing () =
             if isEditing then
                 applySelectedEdit ()
+                dismissCompletions ()
                 isEditing <- false
 
                 if hasExternalChanges && not isDirty then
@@ -501,15 +775,35 @@ type NotebookWindow(path: string) as this =
             clearTerminalImages ()
             cellStack.InvalidateVisual())
 
+        let completionStack =
+            StackPanel(
+                Orientation = Orientation.Vertical,
+                Spacing = 0.0,
+                Background = SolidColorBrush(Color.FromRgb(30uy, 32uy, 38uy))
+            )
 
-        DockPanel.SetDock(header, Dock.Top)
-        DockPanel.SetDock(status, Dock.Bottom)
+        let completionScroller =
+            ScrollViewer(Content = completionStack, IsVisible = false, MaxHeight = 12.0)
+
+        completionPanel <- Some completionStack
+        completionScrollerRef <- Some completionScroller
+
+        [| GridLength.Auto; GridLength.Star; GridLength.Auto; GridLength.Auto |]
+        |> Array.iter (fun h -> root.RowDefinitions.Add(RowDefinition(Height = h)))
+
         DockPanel.SetDock(dirtyIndicator, Dock.Right)
         header.Children.Add(dirtyIndicator) |> ignore
         header.Children.Add(headerText) |> ignore
+
+        Grid.SetRow(header, 0)
+        Grid.SetRow(scroll, 1)
+        Grid.SetRow(completionScroller, 2)
+        Grid.SetRow(status, 3)
+
         root.Children.Add(header) |> ignore
-        root.Children.Add(status) |> ignore
         root.Children.Add(scroll) |> ignore
+        root.Children.Add(completionScroller) |> ignore
+        root.Children.Add(status) |> ignore
 
         base.RequestedThemeVariant <- Styling.ThemeVariant.Dark
         base.Background <- theme.Dark
@@ -528,12 +822,56 @@ type NotebookWindow(path: string) as this =
         this.AddHandler(
             InputElement.KeyDownEvent,
             (fun _ args ->
-                if args.KeyModifiers = KeyModifiers.Control && args.Key = Key.C then
+                if showCompletionList then
+                    match args.Key with
+                    | Key.Down ->
+                        args.Handled <- true
+
+                        completionSelectedIndex <-
+                            Math.Clamp(completionSelectedIndex + 1, 0, completionItems.Length - 1)
+
+                        updateCompletionVisual ()
+                    | Key.Up ->
+                        args.Handled <- true
+
+                        completionSelectedIndex <-
+                            Math.Clamp(completionSelectedIndex - 1, 0, completionItems.Length - 1)
+
+                        updateCompletionVisual ()
+                    | Key.Enter ->
+                        args.Handled <- true
+                        acceptCompletion ()
+                    | Key.Escape ->
+                        args.Handled <- true
+                        dismissCompletions ()
+                    | Key.Tab ->
+                        args.Handled <- true
+                        acceptCompletion ()
+                    | _ -> ()
+                elif args.KeyModifiers = KeyModifiers.Control && args.Key = Key.C then
                     args.Handled <- true
                     requestQuit ()
                 elif args.KeyModifiers = KeyModifiers.Control && args.Key = Key.S then
                     args.Handled <- true
                     saveToDisk ()
+                elif args.KeyModifiers = KeyModifiers.Control && args.Key = Key.Space then
+                    args.Handled <- true
+
+                    if isEditing then
+                        match lspClient with
+                        | Some _ ->
+                            selectedEditor
+                            |> Option.iter (fun editor -> triggerCompletions editor.Text editor.CaretIndex)
+                        | None ->
+                            poplateCompletionPanel
+                                [| { Label = "test1 (no LSP)"
+                                     InsertText = None
+                                     Detail = None
+                                     Kind = None }
+                                   { Label = "test2 (no LSP)"
+                                     InsertText = None
+                                     Detail = None
+                                     Kind = None } |]
                 elif args.Key = Key.F5 && (selectedRunnableCell () |> Option.isSome) then
                     args.Handled <- true
                     runSelectedAsync () |> ignore
@@ -558,6 +896,11 @@ type NotebookWindow(path: string) as this =
 
     override _.OnClosed(args) =
         (fsi :> IDisposable).Dispose()
+
+        match lspClient with
+        | Some client -> (client :> IDisposable).Dispose()
+        | None -> ()
+
         base.OnClosed(args)
 
 type App(path: string) =

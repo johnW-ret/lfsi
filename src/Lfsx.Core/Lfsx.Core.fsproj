@@ -10,6 +10,7 @@
     <Compile Include="Notebook.fs" />
     <Compile Include="LiterateScript.fs" />
     <Compile Include="Fsi.fs" />
+    <Compile Include="LspClient.fs" />
   </ItemGroup>
 
   <ItemGroup>
