@@ -1,4 +1,4 @@
-namespace Lfsx.App
+namespace Lfsi.App
 
 open System
 open System.IO
@@ -15,7 +15,7 @@ open Avalonia.Media
 open Avalonia.Threading
 open Consolonia
 open Consolonia.Themes
-open Lfsx.Core
+open Lfsi.Core
 
 module NativeEnvironment =
     [<Literal>]
@@ -54,7 +54,7 @@ module NotebookHeader =
         | StarWhenDirty -> ""
 
 type NotebookWindow(path: string) as this =
-    inherit Window(Title = "lfsx notebook", WindowState = WindowState.Maximized)
+    inherit Window(Title = "lfsi notebook", WindowState = WindowState.Maximized)
 
     let initialParsed, initialWriteTimeUtc = FilePersistence.load path
     let persistenceMode = AutoReloadWhenClean
@@ -309,7 +309,7 @@ type NotebookWindow(path: string) as this =
             dirtyIndicator.Text <- NotebookHeader.dirtyIndicatorText headerOptions isDirty
 
             if cells.IsEmpty then
-                headerText.Text <- "lfsx  no cells  Ctrl+C quit  B add cell"
+                headerText.Text <- "lfsi  no cells  Ctrl+C quit  B add cell"
             else
                 let saveHint =
                     if isDirty && FilePersistence.canSave persistenceMode then
@@ -327,7 +327,7 @@ type NotebookWindow(path: string) as this =
 
                 headerText.Text <-
                     sprintf
-                        "lfsx  cell %d/%d  %s  Up/Down move  Enter edit  Esc select%s%s  Ctrl+C quit%s"
+                        "lfsi  cell %d/%d  %s  Up/Down move  Enter edit  Esc select%s%s  Ctrl+C quit%s"
                         (selectedIndex + 1)
                         cells.Length
                         (modeLabel ())

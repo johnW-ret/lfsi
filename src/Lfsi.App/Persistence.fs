@@ -1,7 +1,7 @@
-namespace Lfsx.App
+namespace Lfsi.App
 
 open System.IO
-open Lfsx.Core
+open Lfsi.Core
 
 type PersistenceMode =
     | NoPersistence

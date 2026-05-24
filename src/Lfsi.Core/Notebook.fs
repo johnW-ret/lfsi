@@ -1,4 +1,4 @@
-namespace Lfsx.Core
+namespace Lfsi.Core
 
 open System
 
