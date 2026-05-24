@@ -40,18 +40,29 @@ type QuitConfirmation =
     | Arming
     | Armed
 
-type DirtyIndicator =
-    | HideDirtyIndicator
-    | StarWhenDirty
+type HeaderAction = { Key: string; Label: string }
 
-type NotebookHeaderOptions = { DirtyIndicator: DirtyIndicator }
+type HeaderModel =
+    { AppName: string
+      CellPosition: string option
+      Mode: string
+      IsDirty: bool
+      Actions: HeaderAction list }
 
 module NotebookHeader =
-    let dirtyIndicatorText options isDirty =
-        match options.DirtyIndicator with
-        | HideDirtyIndicator -> ""
-        | StarWhenDirty when isDirty -> "*"
-        | StarWhenDirty -> ""
+    let private renderAction action = action.Key + " " + action.Label
+
+    let render model =
+        let position =
+            model.CellPosition
+            |> Option.map (fun value -> "  " + value)
+            |> Option.defaultValue ""
+
+        let dirty = if model.IsDirty then " *" else ""
+
+        let actions = model.Actions |> List.map renderAction |> String.concat "  "
+
+        model.AppName + position + dirty + "  " + model.Mode + "  " + actions
 
 type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
     inherit Window(Title = "lfsi notebook", WindowState = WindowState.Maximized)
@@ -212,8 +223,6 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
               Muted = SolidColorBrush(Color.FromRgb(170uy, 176uy, 184uy))
               Accent = SolidColorBrush(Color.FromRgb(140uy, 190uy, 255uy)) }
 
-        let headerOptions = { DirtyIndicator = StarWhenDirty }
-
         let visualOutputService = ChromeCdpVisualOutputService()
         let visualOutputCache = MemoryVisualOutputCache visualOutputService
 
@@ -237,9 +246,6 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
 
         let headerText =
             TextBlock(Foreground = theme.Accent, Background = theme.Dark, TextWrapping = TextWrapping.Wrap)
-
-        let dirtyIndicator =
-            TextBlock(Foreground = theme.Accent, Background = theme.Dark, Text = "")
 
         let status =
             TextBlock(
@@ -306,34 +312,38 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
         let isSelectedEditor index = isEditing && index = selectedIndex
 
         let updateHeader () =
-            dirtyIndicator.Text <- NotebookHeader.dirtyIndicatorText headerOptions isDirty
+            let actions =
+                [ if not isEditing then
+                      { Key = "↑↓"; Label = "move" }
+                      { Key = "Enter"; Label = "edit" }
+                      { Key = "B"; Label = "below" }
 
-            if cells.IsEmpty then
-                headerText.Text <- "lfsi  no cells  Ctrl+C quit  B add cell"
-            else
-                let saveHint =
-                    if isDirty && FilePersistence.canSave persistenceMode then
-                        "  Ctrl+S save"
-                    else
-                        String.Empty
+                  if isEditing then
+                      { Key = "Esc"; Label = "select" }
 
-                let runHint =
-                    if selectedRunnableCell () |> Option.isSome then
-                        "  F5 run cell"
-                    else
-                        String.Empty
+                  if selectedRunnableCell () |> Option.isSome then
+                      { Key = "F5"; Label = "run" }
 
-                let addHint = if isEditing then String.Empty else "  B add below"
+                  if isDirty && FilePersistence.canSave persistenceMode then
+                      { Key = "Ctrl+S"; Label = "save" }
 
-                headerText.Text <-
-                    sprintf
-                        "lfsi  cell %d/%d  %s  Up/Down move  Enter edit  Esc select%s%s  Ctrl+C quit%s"
-                        (selectedIndex + 1)
-                        cells.Length
-                        (modeLabel ())
-                        runHint
-                        saveHint
-                        addHint
+                  { Key = "Ctrl+C"; Label = "quit" } ]
+
+            let cellPosition =
+                if cells.IsEmpty then
+                    Some "no cells"
+                else
+                    Some(sprintf "%d/%d" (selectedIndex + 1) cells.Length)
+
+            let mode = if cells.IsEmpty then "selection" else modeLabel ()
+
+            headerText.Text <-
+                NotebookHeader.render
+                    { AppName = "lfsi"
+                      CellPosition = cellPosition
+                      Mode = mode
+                      IsDirty = isDirty
+                      Actions = actions }
 
         let markDirty originalSource editedSource =
             if editedSource <> originalSource && not isDirty then
@@ -521,8 +531,6 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
 
         DockPanel.SetDock(header, Dock.Top)
         DockPanel.SetDock(status, Dock.Bottom)
-        DockPanel.SetDock(dirtyIndicator, Dock.Right)
-        header.Children.Add(dirtyIndicator) |> ignore
         header.Children.Add(headerText) |> ignore
         root.Children.Add(header) |> ignore
         root.Children.Add(status) |> ignore
