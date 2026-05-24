@@ -1,4 +1,4 @@
-namespace Lfsx.Core
+namespace Lfsi.Core
 
 module LiterateSyntax =
     let windowsNewline = "\r\n"

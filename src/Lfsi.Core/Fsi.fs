@@ -1,4 +1,4 @@
-namespace Lfsx.Core
+namespace Lfsi.Core
 
 open System
 open System.Diagnostics
@@ -17,10 +17,10 @@ type IFsiSession =
 
 type FsiSession(?workingDirectory: string) =
     [<Literal>]
-    let MimeBeginMarker = "__LFSX_MIME_BEGIN__"
+    let MimeBeginMarker = "__LFSI_MIME_BEGIN__"
 
     [<Literal>]
-    let MimeEndMarker = "__LFSX_MIME_END__"
+    let MimeEndMarker = "__LFSI_MIME_END__"
 
     let workingDirectory = defaultArg workingDirectory Environment.CurrentDirectory
 
@@ -30,10 +30,10 @@ type FsiSession(?workingDirectory: string) =
             path.Replace("\\", "\\\\").Replace("\"", "\\\"")
 
         let dllPath =
-            Path.Combine(Path.GetDirectoryName(typeof<FsiSession>.Assembly.Location), "Lfsx.Display.dll")
+            Path.Combine(Path.GetDirectoryName(typeof<FsiSession>.Assembly.Location), "Lfsi.Display.dll")
             |> escapedAssemblyPath
 
-        "#r \"" + dllPath + "\"" + Environment.NewLine + "open Lfsx"
+        "#r \"" + dllPath + "\"" + Environment.NewLine + "open Lfsi"
 
     let startInfo =
         ProcessStartInfo(
@@ -172,7 +172,7 @@ type FsiSession(?workingDirectory: string) =
         }
 
     let markerBinding marker =
-        "__lfsx_marker_" + Guid.NewGuid().ToString "N" + " = printfn \"" + marker + "\""
+        "__lfsi_marker_" + Guid.NewGuid().ToString "N" + " = printfn \"" + marker + "\""
 
     let sendCodeAndCollect (code: string) (marker: string) (cancellationToken: CancellationToken) =
         task {
@@ -186,7 +186,7 @@ type FsiSession(?workingDirectory: string) =
 
     let tryDisplayValue (code: string) (cleaned: string) (cancellationToken: CancellationToken) =
         task {
-            let displayMarker = "__LFSX_DISPLAY_END_" + Guid.NewGuid().ToString "N" + "__"
+            let displayMarker = "__LFSI_DISPLAY_END_" + Guid.NewGuid().ToString "N" + "__"
             snapshotAndClear () |> ignore
 
             let! displayFinished, displayOut, displayErr =
@@ -214,8 +214,8 @@ type FsiSession(?workingDirectory: string) =
                     { Input = code
                       Output = NotebookOutput.Error "fsi has exited." }
             else
-                let marker = "__LFSX_END_" + Guid.NewGuid().ToString "N" + "__"
-                let helperMarker = "__LFSX_HELPER_END_" + Guid.NewGuid().ToString "N" + "__"
+                let marker = "__LFSI_END_" + Guid.NewGuid().ToString "N" + "__"
+                let helperMarker = "__LFSI_HELPER_END_" + Guid.NewGuid().ToString "N" + "__"
                 snapshotAndClear () |> ignore
 
                 let! helperFinished, _, helperErr = sendCodeAndCollect displayHelpers helperMarker cancellationToken

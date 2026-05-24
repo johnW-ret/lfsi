@@ -24,4 +24,4 @@ jobs:
       - run: dotnet tool restore
       - run: dotnet fantomas --check .
 
-      - run: dotnet build src/Lfsx.App/Lfsx.App.fsproj
+      - run: dotnet build src/Lfsi.App/Lfsi.App.fsproj

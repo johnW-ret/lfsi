@@ -1,4 +1,4 @@
-namespace Lfsx
+namespace Lfsi
 
 open System
 open System.IO
@@ -26,9 +26,9 @@ module Display =
 
     module private Output =
         let emitEncodedMime (mime: string) (encoded: string) =
-            printfn "__LFSX_MIME_BEGIN__%s" mime
+            printfn "__LFSI_MIME_BEGIN__%s" mime
             printfn "%s" encoded
-            printfn "__LFSX_MIME_END__"
+            printfn "__LFSI_MIME_END__"
 
     let display (mime: MimeType) (value: string) =
         value

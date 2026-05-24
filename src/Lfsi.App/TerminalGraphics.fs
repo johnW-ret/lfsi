@@ -1,4 +1,4 @@
-namespace Lfsx.App
+namespace Lfsi.App
 
 open System
 
@@ -23,8 +23,8 @@ type TerminalEnvironment =
     { Term: string option
       TermProgram: string option
       GhosttyResourcesDir: string option
-      LfsxTerminalGraphics: string option
-      LfsxEnableKittyGraphics: string option }
+      LfsiTerminalGraphics: string option
+      LfsiEnableKittyGraphics: string option }
 
 type TerminalGraphicsDecision =
     | UseTerminalGraphics of TerminalGraphicsProtocol
@@ -40,8 +40,8 @@ module TerminalGraphics =
         { Term = env "TERM"
           TermProgram = env "TERM_PROGRAM"
           GhosttyResourcesDir = env "GHOSTTY_RESOURCES_DIR"
-          LfsxTerminalGraphics = env "LFSX_TERMINAL_GRAPHICS"
-          LfsxEnableKittyGraphics = env "LFSX_ENABLE_KITTY_GRAPHICS" }
+          LfsiTerminalGraphics = env "LFSI_TERMINAL_GRAPHICS"
+          LfsiEnableKittyGraphics = env "LFSI_ENABLE_KITTY_GRAPHICS" }
 
     let private contains (part: string) (value: string option) =
         value
@@ -68,7 +68,7 @@ module TerminalGraphics =
 
     let parseMode environment =
         match
-            environment.LfsxTerminalGraphics
+            environment.LfsiTerminalGraphics
             |> Option.map (fun value -> value.Trim().ToLowerInvariant())
         with
         | Some "off"
@@ -82,7 +82,7 @@ module TerminalGraphics =
         | Some "iterm2" -> Force Osc1337
         | Some "auto"
         | None ->
-            match environment.LfsxEnableKittyGraphics with
+            match environment.LfsiEnableKittyGraphics with
             | Some "1" -> Force Kitty
             | _ -> Auto
         | Some _ -> Auto
@@ -96,6 +96,6 @@ module TerminalGraphics =
             | KittyTerminal
             | Ghostty -> UseTerminalGraphics Kitty
             | WezTerm ->
-                UseTextFallback "WezTerm terminal graphics require explicit opt-in with LFSX_TERMINAL_GRAPHICS=kitty."
+                UseTextFallback "WezTerm terminal graphics require explicit opt-in with LFSI_TERMINAL_GRAPHICS=kitty."
             | ITerm2 -> UseTextFallback "iTerm2 graphics require the OSC1337 backend."
             | UnknownTerminal -> UseTextFallback "No supported terminal graphics protocol was detected."

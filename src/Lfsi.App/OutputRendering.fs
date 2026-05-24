@@ -1,4 +1,4 @@
-namespace Lfsx.App
+namespace Lfsi.App
 
 open System
 open System.Collections.Generic
@@ -18,7 +18,7 @@ open Avalonia.Media
 open Avalonia.Media.Imaging
 open Avalonia.Threading
 open Avalonia.VisualTree
-open Lfsx.Core
+open Lfsi.Core
 
 type NotebookTheme =
     { Dark: SolidColorBrush
@@ -254,10 +254,10 @@ type ChromeCdpVisualOutputService(?chromePath: string, ?viewportWidth: int, ?vie
                 let port = availablePort ()
 
                 let userDataDir =
-                    Path.Combine(Path.GetTempPath(), "lfsx-chrome-" + Guid.NewGuid().ToString("N"))
+                    Path.Combine(Path.GetTempPath(), "lfsi-chrome-" + Guid.NewGuid().ToString("N"))
 
                 let htmlPath =
-                    Path.Combine(Path.GetTempPath(), "lfsx-output-" + Guid.NewGuid().ToString("N") + ".html")
+                    Path.Combine(Path.GetTempPath(), "lfsi-output-" + Guid.NewGuid().ToString("N") + ".html")
 
                 Directory.CreateDirectory(userDataDir) |> ignore
                 File.WriteAllText(htmlPath, htmlDocument html)
