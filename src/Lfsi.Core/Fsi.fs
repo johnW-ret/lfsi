@@ -15,7 +15,7 @@ type IFsiSession =
     inherit IDisposable
     abstract ExecuteAsync: code: string * cancellationToken: CancellationToken -> Task<FsiExecution>
 
-type FsiSession(?workingDirectory: string) =
+type FsiSession(?workingDirectory: string, ?executablePath: string) =
     [<Literal>]
     let MimeBeginMarker = "__LFSI_MIME_BEGIN__"
 
@@ -23,6 +23,11 @@ type FsiSession(?workingDirectory: string) =
     let MimeEndMarker = "__LFSI_MIME_END__"
 
     let workingDirectory = defaultArg workingDirectory Environment.CurrentDirectory
+
+    let executablePath =
+        executablePath
+        |> Option.filter (String.IsNullOrWhiteSpace >> not)
+        |> Option.defaultValue "dotnet"
 
 
     let displayHelpers =
@@ -37,7 +42,7 @@ type FsiSession(?workingDirectory: string) =
 
     let startInfo =
         ProcessStartInfo(
-            FileName = "dotnet",
+            FileName = executablePath,
             Arguments = "fsi --nologo --readline-",
             RedirectStandardInput = true,
             RedirectStandardOutput = true,

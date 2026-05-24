@@ -53,7 +53,7 @@ module NotebookHeader =
         | StarWhenDirty when isDirty -> "*"
         | StarWhenDirty -> ""
 
-type NotebookWindow(path: string) as this =
+type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
     inherit Window(Title = "lfsi notebook", WindowState = WindowState.Maximized)
 
     let initialParsed, initialWriteTimeUtc = FilePersistence.load path
@@ -67,7 +67,7 @@ type NotebookWindow(path: string) as this =
         else
             directory
 
-    let fsi = new FsiSession(fsiWorkingDirectory)
+    let fsi = new FsiSession(fsiWorkingDirectory, configuration.Fsi.ExecutablePath)
     let quitConfirmationMessage = "Press Ctrl+C again to quit, or Esc to cancel."
     let mutable parsed = initialParsed
     let mutable lastWriteTimeUtc = initialWriteTimeUtc
@@ -580,14 +580,15 @@ type NotebookWindow(path: string) as this =
         (fsi :> IDisposable).Dispose()
         base.OnClosed(args)
 
-type App(path: string) =
+type App(path: string, configuration: LfsiConfiguration) =
     inherit Application()
 
     override this.Initialize() = this.Styles.Add(ModernTheme())
 
     override _.OnFrameworkInitializationCompleted() =
         match base.ApplicationLifetime with
-        | :? IClassicDesktopStyleApplicationLifetime as desktop -> desktop.MainWindow <- NotebookWindow(path)
+        | :? IClassicDesktopStyleApplicationLifetime as desktop ->
+            desktop.MainWindow <- NotebookWindow(path, configuration)
         | _ -> ()
 
         base.OnFrameworkInitializationCompleted()
@@ -598,8 +599,13 @@ module Program =
 
     let private buildApp path =
         configureTerminalEnvironment ()
+        let configuration = LfsiConfiguration.load ()
 
-        AppBuilder.Configure(fun () -> App(path)).UseConsolonia().UseAutoDetectedConsole().LogToException()
+        AppBuilder
+            .Configure(fun () -> App(path, configuration))
+            .UseConsolonia()
+            .UseAutoDetectedConsole()
+            .LogToException()
 
     [<EntryPoint>]
     let main argv =
