@@ -200,6 +200,10 @@ type NotebookWindow(path: string) as this =
             else
                 cell)
 
+    let insertCellAt index cell cells =
+        let before, after = cells |> List.splitAt index
+        before @ (cell :: after)
+
     do
         let theme =
             { Dark = SolidColorBrush(Color.FromRgb(18uy, 18uy, 18uy))
@@ -305,7 +309,7 @@ type NotebookWindow(path: string) as this =
             dirtyIndicator.Text <- NotebookHeader.dirtyIndicatorText headerOptions isDirty
 
             if cells.IsEmpty then
-                headerText.Text <- "lfsx  no cells  Ctrl+C quit"
+                headerText.Text <- "lfsx  no cells  Ctrl+C quit  B add cell"
             else
                 let saveHint =
                     if isDirty && FilePersistence.canSave persistenceMode then
@@ -319,14 +323,17 @@ type NotebookWindow(path: string) as this =
                     else
                         String.Empty
 
+                let addHint = if isEditing then String.Empty else "  B add below"
+
                 headerText.Text <-
                     sprintf
-                        "lfsx  cell %d/%d  %s  Up/Down move  Enter edit  Esc select%s%s  Ctrl+C quit"
+                        "lfsx  cell %d/%d  %s  Up/Down move  Enter edit  Esc select%s%s  Ctrl+C quit%s"
                         (selectedIndex + 1)
                         cells.Length
                         (modeLabel ())
                         runHint
                         saveHint
+                        addHint
 
         let markDirty originalSource editedSource =
             if editedSource <> originalSource && not isDirty then
@@ -395,6 +402,16 @@ type NotebookWindow(path: string) as this =
         let beginEditing () =
             if not cells.IsEmpty && not isEditing && not isRunning then
                 isEditing <- true
+                rebuildCells ()
+
+        let addCellBelow () =
+            if not isEditing && not isRunning then
+                let insertIndex = if cells.IsEmpty then 0 else selectedIndex + 1
+
+                cells <- cells |> insertCellAt insertIndex (NotebookCell.create CellKind.Code "")
+                selectedIndex <- insertIndex
+                isDirty <- true
+                setStatus "Added code cell below."
                 rebuildCells ()
 
         let reloadFromDisk message =
@@ -537,6 +554,9 @@ type NotebookWindow(path: string) as this =
                 elif args.Key = Key.F5 && (selectedRunnableCell () |> Option.isSome) then
                     args.Handled <- true
                     runSelectedAsync () |> ignore
+                elif args.Key = Key.B && args.KeyModifiers = KeyModifiers.None && not isEditing then
+                    args.Handled <- true
+                    addCellBelow ()
                 elif args.Key = Key.Down && not isEditing then
                     args.Handled <- true
                     moveSelection 1
