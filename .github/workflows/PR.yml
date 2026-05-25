@@ -25,3 +25,4 @@ jobs:
       - run: dotnet fantomas --check .
 
       - run: dotnet build src/Lfsi.App/Lfsi.App.fsproj
+      - run: dotnet test tests/Lfsi.Tests/Lfsi.Tests.fsproj
