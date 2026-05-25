@@ -309,12 +309,7 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
     let cloneCell cell = { cell with Id = Guid.NewGuid() }
 
     let replaceCellAt index replacement cells =
-        cells
-        |> List.mapi (fun i cell ->
-            if i = index then
-                replacement
-            else
-                cell)
+        cells |> List.mapi (fun i cell -> if i = index then replacement else cell)
 
     do
         let theme =
@@ -419,7 +414,10 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
                       { Key = "Enter"; Label = "edit" }
                       { Key = "A"; Label = "above" }
                       { Key = "B"; Label = "below" }
-                      { Key = "X/C/V"; Label = "cut/copy/paste" }
+
+                      { Key = "X/C/V"
+                        Label = "cut/copy/paste" }
+
                       { Key = "M/Y"; Label = "markdown/code" }
 
                   if isEditing then
@@ -553,11 +551,13 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
                 |> Option.iter (fun cell ->
                     cellClipboard <- Some cell
                     cells <- cells |> removeCellAt selectedIndex
+
                     selectedIndex <-
                         if cells.IsEmpty then
                             0
                         else
                             Math.Clamp(selectedIndex, 0, cells.Length - 1)
+
                     isDirty <- true
                     setStatus "Cut cell."
                     rebuildCells ())
@@ -582,11 +582,13 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
                 |> Option.iter (fun cell ->
                     cells <- cells |> replaceCellAt selectedIndex { cell with Kind = kind; Outputs = [] }
                     isDirty <- true
+
                     setStatus (
                         match kind with
                         | CellKind.Markdown -> "Converted cell to Markdown."
                         | CellKind.Code -> "Converted cell to code."
                     )
+
                     rebuildCells ())
 
         let reloadFromDisk message =
