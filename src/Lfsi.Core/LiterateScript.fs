@@ -41,11 +41,14 @@ module LiterateScript =
         not (body.Contains(LiterateSyntax.unixNewline, StringComparison.Ordinal))
         && String.IsNullOrWhiteSpace body
 
-    let private codeCell source =
+    let private codeCell preserveEmpty source =
         let source = source |> trimOneTrailingNewline
 
         if String.IsNullOrWhiteSpace source then
-            None
+            if preserveEmpty then
+                Some(block CellKind.Code "")
+            else
+                None
         else
             Some(block CellKind.Code source)
 
@@ -58,6 +61,16 @@ module LiterateScript =
     let private findToken (source: string) token start =
         let index = source.IndexOf(token, start, StringComparison.Ordinal)
         if index = notFoundIndex then None else Some index
+
+    let private startsWithAt (source: string) token index =
+        index + String.length token <= source.Length
+        && source.Substring(index, String.length token).Equals(token, StringComparison.Ordinal)
+
+    let private skipCellSpacing (source: string) index =
+        if startsWithAt source LiterateSyntax.cellSpacing index then
+            index + LiterateSyntax.cellSpacing.Length
+        else
+            index
 
     let private findMarkdownStart (source: string) start =
         let rec loop cursor =
@@ -77,19 +90,14 @@ module LiterateScript =
         loop start
 
     let private parseCells (source: string) =
-        let rec loop cursor cells =
+        let rec loop cursor preserveEmptyCode cells =
             match findMarkdownStart source cursor with
             | None ->
                 substring source cursor source.Length
-                |> codeCell
+                |> codeCell preserveEmptyCode
                 |> fun cell -> prependIfSome cell cells
                 |> List.rev
             | Some startIndex ->
-                let cells =
-                    substring source cursor startIndex
-                    |> codeCell
-                    |> fun cell -> prependIfSome cell cells
-
                 match
                     findToken
                         source
@@ -98,22 +106,39 @@ module LiterateScript =
                 with
                 | None ->
                     substring source startIndex source.Length
-                    |> codeCell
+                    |> codeCell preserveEmptyCode
                     |> fun cell -> prependIfSome cell cells
                     |> List.rev
                 | Some endIndex ->
-                    let body =
-                        substring source (startIndex + LiterateSyntax.markdownOpenToken.Length) endIndex
+                    if isSingleLineEmptyMarkdownSeparator source startIndex endIndex then
+                        let cells =
+                            substring source cursor startIndex
+                            |> codeCell true
+                            |> fun cell -> prependIfSome cell cells
 
-                    let cells =
-                        if isSingleLineEmptyMarkdownSeparator source startIndex endIndex then
+                        loop
+                            (endIndex
+                             + LiterateSyntax.markdownCloseToken.Length
+                             |> skipCellSpacing source)
+                            true
                             cells
-                        else
-                            block CellKind.Markdown body :: cells
+                    else
+                        let cells =
+                            substring source cursor startIndex
+                            |> codeCell preserveEmptyCode
+                            |> fun cell -> prependIfSome cell cells
 
-                    loop (endIndex + LiterateSyntax.markdownCloseToken.Length) cells
+                        let body =
+                            substring source (startIndex + LiterateSyntax.markdownOpenToken.Length) endIndex
 
-        loop 0 []
+                        loop
+                            (endIndex
+                             + LiterateSyntax.markdownCloseToken.Length
+                             |> skipCellSpacing source)
+                            false
+                            (block CellKind.Markdown body :: cells)
+
+        loop 0 false []
 
     let parse (sourcePath: string option) (source: string) =
         let source = normalizeNewlines source
