@@ -400,6 +400,7 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
                 [ if not isEditing then
                       { Key = "↑↓"; Label = "move" }
                       { Key = "Enter"; Label = "edit" }
+                      { Key = "A"; Label = "above" }
                       { Key = "B"; Label = "below" }
 
                   if isEditing then
@@ -506,6 +507,16 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
                 selectedIndex <- insertIndex
                 isDirty <- true
                 setStatus "Added code cell below."
+                rebuildCells ()
+
+        let addCellAbove () =
+            if not isEditing && not isRunning then
+                let insertIndex = if cells.IsEmpty then 0 else selectedIndex
+
+                cells <- cells |> insertCellAt insertIndex (NotebookCell.create CellKind.Code "")
+                selectedIndex <- insertIndex
+                isDirty <- true
+                setStatus "Added code cell above."
                 rebuildCells ()
 
         let reloadFromDisk message =
@@ -646,6 +657,9 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
                 elif args.Key = Key.F5 && (selectedRunnableCell () |> Option.isSome) then
                     args.Handled <- true
                     runSelectedAsync () |> ignore
+                elif args.Key = Key.A && args.KeyModifiers = KeyModifiers.None && not isEditing then
+                    args.Handled <- true
+                    addCellAbove ()
                 elif args.Key = Key.B && args.KeyModifiers = KeyModifiers.None && not isEditing then
                     args.Handled <- true
                     addCellBelow ()
