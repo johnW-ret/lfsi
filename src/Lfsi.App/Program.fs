@@ -94,6 +94,7 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
     let mutable isRunning = false
     let mutable hasExternalChanges = false
     let mutable selectedEditor: TextBox option = None
+    let mutable cellClipboard: NotebookCell option = None
 
     let formattingStatus () =
         if parsed.FormattingDiagnostics.IsEmpty then
@@ -299,6 +300,14 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
         let before, after = cells |> List.splitAt index
         before @ (cell :: after)
 
+    let removeCellAt index cells =
+        cells
+        |> List.mapi (fun i cell -> i, cell)
+        |> List.filter (fst >> (<>) index)
+        |> List.map snd
+
+    let cloneCell cell = { cell with Id = Guid.NewGuid() }
+
     let replaceCellAt index replacement cells =
         cells
         |> List.mapi (fun i cell ->
@@ -410,6 +419,7 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
                       { Key = "Enter"; Label = "edit" }
                       { Key = "A"; Label = "above" }
                       { Key = "B"; Label = "below" }
+                      { Key = "X/C/V"; Label = "cut/copy/paste" }
                       { Key = "M/Y"; Label = "markdown/code" }
 
                   if isEditing then
@@ -527,6 +537,42 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
                 isDirty <- true
                 setStatus "Added code cell above."
                 rebuildCells ()
+
+        let copyCell () =
+            if not isEditing && not isRunning then
+                cells
+                |> List.tryItem selectedIndex
+                |> Option.iter (fun cell ->
+                    cellClipboard <- Some cell
+                    setStatus "Copied cell.")
+
+        let cutCell () =
+            if not isEditing && not isRunning then
+                cells
+                |> List.tryItem selectedIndex
+                |> Option.iter (fun cell ->
+                    cellClipboard <- Some cell
+                    cells <- cells |> removeCellAt selectedIndex
+                    selectedIndex <-
+                        if cells.IsEmpty then
+                            0
+                        else
+                            Math.Clamp(selectedIndex, 0, cells.Length - 1)
+                    isDirty <- true
+                    setStatus "Cut cell."
+                    rebuildCells ())
+
+        let pasteCellBelow () =
+            if not isEditing && not isRunning then
+                cellClipboard
+                |> Option.iter (fun cell ->
+                    let insertIndex = if cells.IsEmpty then 0 else selectedIndex + 1
+
+                    cells <- cells |> insertCellAt insertIndex (cloneCell cell)
+                    selectedIndex <- insertIndex
+                    isDirty <- true
+                    setStatus "Pasted cell below."
+                    rebuildCells ())
 
         let convertSelectedCell kind =
             if not isEditing && not isRunning then
@@ -687,6 +733,15 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
                 elif args.Key = Key.B && args.KeyModifiers = KeyModifiers.None && not isEditing then
                     args.Handled <- true
                     addCellBelow ()
+                elif args.Key = Key.X && args.KeyModifiers = KeyModifiers.None && not isEditing then
+                    args.Handled <- true
+                    cutCell ()
+                elif args.Key = Key.C && args.KeyModifiers = KeyModifiers.None && not isEditing then
+                    args.Handled <- true
+                    copyCell ()
+                elif args.Key = Key.V && args.KeyModifiers = KeyModifiers.None && not isEditing then
+                    args.Handled <- true
+                    pasteCellBelow ()
                 elif args.Key = Key.M && args.KeyModifiers = KeyModifiers.None && not isEditing then
                     args.Handled <- true
                     convertSelectedCell CellKind.Markdown
