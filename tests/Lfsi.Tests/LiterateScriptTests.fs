@@ -45,4 +45,21 @@ module LiterateScriptTests =
                   let cells = (LiterateScript.parse None source).Document.Cells
 
                   Expect.equal (cells |> List.map _.Source) [ "markdown"; "let value = 1" ] "cell sources"
+                  Expect.equal (cells |> List.map _.Kind) [ Markdown; Code ] "cell kinds"
+
+              testCase "parse preserves leading blank lines in code cells after markdown"
+              <| fun _ ->
+                  let source =
+                      LiterateSyntax.markdownOpenToken
+                      + LiterateSyntax.unixNewline
+                      + "markdown"
+                      + LiterateSyntax.unixNewline
+                      + LiterateSyntax.markdownCloseToken
+                      + LiterateSyntax.cellSpacing
+                      + LiterateSyntax.cellSpacing
+                      + "let value = 1"
+
+                  let cells = (LiterateScript.parse None source).Document.Cells
+
+                  Expect.equal (cells |> List.map _.Source) [ "markdown"; "\n\nlet value = 1" ] "cell sources"
                   Expect.equal (cells |> List.map _.Kind) [ Markdown; Code ] "cell kinds" ]
