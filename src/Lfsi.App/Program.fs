@@ -299,6 +299,14 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
         let before, after = cells |> List.splitAt index
         before @ (cell :: after)
 
+    let replaceCellAt index replacement cells =
+        cells
+        |> List.mapi (fun i cell ->
+            if i = index then
+                replacement
+            else
+                cell)
+
     do
         let theme =
             { Dark = SolidColorBrush(Color.FromRgb(18uy, 18uy, 18uy))
@@ -402,6 +410,7 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
                       { Key = "Enter"; Label = "edit" }
                       { Key = "A"; Label = "above" }
                       { Key = "B"; Label = "below" }
+                      { Key = "M/Y"; Label = "markdown/code" }
 
                   if isEditing then
                       { Key = "Esc"; Label = "select" }
@@ -518,6 +527,21 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
                 isDirty <- true
                 setStatus "Added code cell above."
                 rebuildCells ()
+
+        let convertSelectedCell kind =
+            if not isEditing && not isRunning then
+                cells
+                |> List.tryItem selectedIndex
+                |> Option.filter (fun cell -> cell.Kind <> kind)
+                |> Option.iter (fun cell ->
+                    cells <- cells |> replaceCellAt selectedIndex { cell with Kind = kind; Outputs = [] }
+                    isDirty <- true
+                    setStatus (
+                        match kind with
+                        | CellKind.Markdown -> "Converted cell to Markdown."
+                        | CellKind.Code -> "Converted cell to code."
+                    )
+                    rebuildCells ())
 
         let reloadFromDisk message =
             let nextParsed, nextWriteTimeUtc = FilePersistence.load path
@@ -663,6 +687,12 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
                 elif args.Key = Key.B && args.KeyModifiers = KeyModifiers.None && not isEditing then
                     args.Handled <- true
                     addCellBelow ()
+                elif args.Key = Key.M && args.KeyModifiers = KeyModifiers.None && not isEditing then
+                    args.Handled <- true
+                    convertSelectedCell CellKind.Markdown
+                elif args.Key = Key.Y && args.KeyModifiers = KeyModifiers.None && not isEditing then
+                    args.Handled <- true
+                    convertSelectedCell CellKind.Code
                 elif args.Key = Key.Down && not isEditing then
                     args.Handled <- true
                     moveSelection 1
