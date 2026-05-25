@@ -49,6 +49,10 @@ type HeaderModel =
       IsDirty: bool
       Actions: HeaderAction list }
 
+type WordJumpDirection =
+    | PreviousWord
+    | NextWord
+
 module NotebookHeader =
     let private renderAction action = action.Key + " " + action.Label
 
@@ -151,6 +155,73 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
         cellStack.Children.Add(frame) |> ignore
         frame
 
+    let tryGetWordJumpDirection (args: KeyEventArgs) =
+        let hasModifier modifier = args.KeyModifiers.HasFlag modifier
+
+        if hasModifier KeyModifiers.Shift then
+            None
+        elif hasModifier KeyModifiers.Alt && args.Key = Key.B then
+            Some PreviousWord
+        elif hasModifier KeyModifiers.Alt && args.Key = Key.F then
+            Some NextWord
+        elif
+            (hasModifier KeyModifiers.Control || hasModifier KeyModifiers.Alt)
+            && args.Key = Key.Left
+        then
+            Some PreviousWord
+        elif
+            (hasModifier KeyModifiers.Control || hasModifier KeyModifiers.Alt)
+            && args.Key = Key.Right
+        then
+            Some NextWord
+        else
+            None
+
+    let previousWordBoundary caretIndex (text: string) =
+        if caretIndex <= 0 then
+            0
+        else
+            let mutable index = Math.Min(caretIndex, text.Length) - 1
+
+            while index >= 0 && Char.IsWhiteSpace text.[index] do
+                index <- index - 1
+
+            while index >= 0 && not (Char.IsWhiteSpace text.[index]) do
+                index <- index - 1
+
+            index + 1
+
+    let nextWordBoundary caretIndex (text: string) =
+        let mutable index =
+            if caretIndex < 0 then 0
+            elif caretIndex > text.Length then text.Length
+            else caretIndex
+
+        while index < text.Length && not (Char.IsWhiteSpace text.[index]) do
+            index <- index + 1
+
+        while index < text.Length && Char.IsWhiteSpace text.[index] do
+            index <- index + 1
+
+        index
+
+    let setEditorCaret index (editor: TextBox) =
+        editor.CaretIndex <- index
+        editor.SelectionStart <- index
+        editor.SelectionEnd <- index
+
+    let moveEditorCaretByWord direction (editor: TextBox) =
+        let text = editor.Text |> Option.ofObj |> Option.defaultValue ""
+
+        let nextIndex =
+            match direction with
+            | PreviousWord -> previousWordBoundary editor.CaretIndex text
+            | NextWord -> nextWordBoundary editor.CaretIndex text
+
+        setEditorCaret nextIndex editor
+        // TextBox may adjust the caret after KeyDown; post once to win that ordering.
+        Dispatcher.UIThread.Post(fun () -> setEditorCaret nextIndex editor)
+
     let addEditableCell
         theme
         selectedBrush
@@ -180,6 +251,19 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
             )
 
         editor.TextChanged.Add(fun _ -> onTextChanged cell.Source editor.Text)
+
+        editor.AddHandler(
+            InputElement.KeyDownEvent,
+            (fun _ args ->
+                match tryGetWordJumpDirection args with
+                | Some direction ->
+                    args.Handled <- true
+                    moveEditorCaretByWord direction editor
+                | None -> ()),
+            RoutingStrategies.Tunnel,
+            true
+        )
+
         body.Children.Add(editor) |> ignore
         addCellOutputs theme errorBrush visualOutputCache imageBackend body cell
 
