@@ -28,8 +28,17 @@ module LiterateScript =
         else
             text
 
-    let private block kind source =
-        NotebookCell.create kind (source |> trimOneLeadingNewline |> trimOneTrailingNewline)
+    let private markdownBlock source =
+        NotebookCell.create CellKind.Markdown (source |> trimOneLeadingNewline |> trimOneTrailingNewline)
+
+    let private codeBlock source =
+        NotebookCell.create CellKind.Code source
+
+    let private trimTrailingCellSpacing (source: string) =
+        if source.EndsWith(LiterateSyntax.cellSpacing, StringComparison.Ordinal) then
+            source.Substring(0, source.Length - LiterateSyntax.cellSpacing.Length)
+        else
+            source
 
     let private isSingleLineEmptyMarkdownSeparator (source: string) startIndex endIndex =
         let body =
@@ -42,15 +51,10 @@ module LiterateScript =
         && String.IsNullOrWhiteSpace body
 
     let private codeCell preserveEmpty source =
-        let source = source |> trimOneTrailingNewline
-
         if String.IsNullOrWhiteSpace source then
-            if preserveEmpty then
-                Some(block CellKind.Code "")
-            else
-                None
+            if preserveEmpty then Some(codeBlock "") else None
         else
-            Some(block CellKind.Code source)
+            Some(codeBlock source)
 
     let private prependIfSome item items =
         item |> Option.map (fun x -> x :: items) |> Option.defaultValue items
@@ -113,18 +117,15 @@ module LiterateScript =
                     if isSingleLineEmptyMarkdownSeparator source startIndex endIndex then
                         let cells =
                             substring source cursor startIndex
+                            |> trimTrailingCellSpacing
                             |> codeCell true
                             |> fun cell -> prependIfSome cell cells
 
-                        loop
-                            (endIndex
-                             + LiterateSyntax.markdownCloseToken.Length
-                             |> skipCellSpacing source)
-                            true
-                            cells
+                        loop (endIndex + LiterateSyntax.markdownCloseToken.Length |> skipCellSpacing source) true cells
                     else
                         let cells =
                             substring source cursor startIndex
+                            |> trimTrailingCellSpacing
                             |> codeCell preserveEmptyCode
                             |> fun cell -> prependIfSome cell cells
 
@@ -132,11 +133,9 @@ module LiterateScript =
                             substring source (startIndex + LiterateSyntax.markdownOpenToken.Length) endIndex
 
                         loop
-                            (endIndex
-                             + LiterateSyntax.markdownCloseToken.Length
-                             |> skipCellSpacing source)
+                            (endIndex + LiterateSyntax.markdownCloseToken.Length |> skipCellSpacing source)
                             false
-                            (block CellKind.Markdown body :: cells)
+                            (markdownBlock body :: cells)
 
         loop 0 false []
 
