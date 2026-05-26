@@ -30,6 +30,8 @@ type FsiSession(?workingDirectory: string, ?executablePath: string, ?enableRichD
         |> Option.defaultValue "dotnet"
 
     let enableRichDisplay = defaultArg enableRichDisplay true
+    let executionTimeout = TimeSpan.FromSeconds 20.0
+    let pollInterval = TimeSpan.FromMilliseconds 50.0
 
     let displayHelpers =
         let escapedAssemblyPath (path: string) =
@@ -161,18 +163,17 @@ type FsiSession(?workingDirectory: string, ?executablePath: string, ?enableRichD
         task {
             let accumulatedOut = StringBuilder()
             let accumulatedErr = StringBuilder()
-            let mutable attempts = 200
+            let timeoutAt = DateTimeOffset.UtcNow + executionTimeout
             let mutable finished = false
 
-            while not finished && attempts > 0 do
+            while not finished && DateTimeOffset.UtcNow < timeoutAt do
                 let outText, errText = snapshotAndClear ()
                 accumulatedOut.Append outText |> ignore
                 accumulatedErr.Append errText |> ignore
                 finished <- accumulatedOut.ToString().Contains(marker, StringComparison.Ordinal)
 
                 if not finished then
-                    attempts <- attempts - 1
-                    do! Task.Delay(50, cancellationToken)
+                    do! Task.Delay(pollInterval, cancellationToken)
 
             return finished, accumulatedOut.ToString(), accumulatedErr.ToString()
         }
