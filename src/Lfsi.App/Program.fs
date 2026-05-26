@@ -1,6 +1,7 @@
 namespace Lfsi.App
 
 open System
+open System.Collections.Generic
 open System.IO
 open System.Runtime.InteropServices
 open System.Threading
@@ -116,12 +117,20 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
             )
             |> ignore
 
+    let renderCellSourceControl theme renderCodeSource cell =
+        match cell.Kind with
+        | CellKind.Code -> renderCodeSource (cell.Source.TrimEnd())
+        | CellKind.Markdown ->
+            TextBlock(Text = cell.Source.TrimEnd(), Foreground = theme.Text, TextWrapping = TextWrapping.NoWrap)
+            :> Control
+
     let addCellPreview
         theme
         selectedBrush
         errorBrush
         visualOutputCache
         imageBackend
+        renderCellSource
         selectedIndex
         (cellStack: StackPanel)
         index
@@ -138,10 +147,7 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
         )
         |> ignore
 
-        body.Children.Add(
-            TextBlock(Text = cell.Source.TrimEnd(), Foreground = theme.Text, TextWrapping = TextWrapping.NoWrap)
-        )
-        |> ignore
+        body.Children.Add(renderCellSource cell) |> ignore
 
         addCellOutputs theme errorBrush visualOutputCache imageBackend body cell
 
@@ -229,6 +235,8 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
         errorBrush
         visualOutputCache
         imageBackend
+        renderCodeSource
+        updateHighlightedCode
         (cellStack: StackPanel)
         onTextChanged
         index
@@ -251,7 +259,18 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
                 MinHeight = 3.0
             )
 
-        editor.TextChanged.Add(fun _ -> onTextChanged cell.Source editor.Text)
+        let highlightedEditor =
+            match cell.Kind with
+            | CellKind.Code -> Some(renderCodeSource (editor.Text |> Option.ofObj |> Option.defaultValue ""))
+            | CellKind.Markdown -> None
+
+        editor.TextChanged.Add(fun _ ->
+            let editorText = editor.Text |> Option.ofObj |> Option.defaultValue ""
+
+            onTextChanged cell.Source editorText
+
+            highlightedEditor
+            |> Option.iter (fun block -> updateHighlightedCode editorText block))
 
         editor.AddHandler(
             InputElement.KeyDownEvent,
@@ -266,6 +285,10 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
         )
 
         body.Children.Add(editor) |> ignore
+
+        highlightedEditor
+        |> Option.iter (fun block -> body.Children.Add block |> ignore)
+
         addCellOutputs theme errorBrush visualOutputCache imageBackend body cell
 
         cellStack.Children.Add(
@@ -318,6 +341,37 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
               Text = SolidColorBrush(Color.FromRgb(232uy, 232uy, 232uy))
               Muted = SolidColorBrush(Color.FromRgb(170uy, 176uy, 184uy))
               Accent = SolidColorBrush(Color.FromRgb(140uy, 190uy, 255uy)) }
+
+        let syntaxHighlighting = SyntaxHighlighting.defaultMode
+
+        let syntaxPalette: SyntaxHighlighting.Palette =
+            { Default = theme.Text
+              Keyword = SolidColorBrush(Color.FromRgb(255uy, 160uy, 210uy))
+              String = SolidColorBrush(Color.FromRgb(180uy, 230uy, 150uy))
+              Comment = theme.Muted
+              Number = SolidColorBrush(Color.FromRgb(255uy, 205uy, 140uy))
+              Operator = SolidColorBrush(Color.FromRgb(160uy, 210uy, 255uy))
+              Preprocessor = SolidColorBrush(Color.FromRgb(210uy, 180uy, 255uy)) }
+
+        let highlightedCodeCache =
+            Dictionary<string, SyntaxHighlighting.HighlightSpan list>()
+
+        let highlightedCodeSpans source =
+            match highlightedCodeCache.TryGetValue source with
+            | true, spans -> spans
+            | false, _ ->
+                let spans = SyntaxHighlighting.highlight syntaxHighlighting source
+                highlightedCodeCache.[source] <- spans
+                spans
+
+        let renderCodeSource source =
+            SyntaxHighlighting.textBlock syntaxPalette (highlightedCodeSpans source)
+
+        let renderCellSource cell =
+            renderCellSourceControl theme (renderCodeSource >> fun block -> block :> Control) cell
+
+        let updateHighlightedCode source block =
+            SyntaxHighlighting.updateTextBlock syntaxPalette (highlightedCodeSpans source) block
 
         let visualOutputService = ChromeCdpVisualOutputService()
         let visualOutputCache = MemoryVisualOutputCache visualOutputService
@@ -470,6 +524,8 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
                                 errorBrush
                                 visualOutputCache
                                 imageBackend
+                                renderCodeSource
+                                updateHighlightedCode
                                 cellStack
                                 markDirty
                                 index
@@ -483,6 +539,7 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
                             errorBrush
                             visualOutputCache
                             imageBackend
+                            renderCellSource
                             selectedIndex
                             cellStack
                             index
@@ -596,6 +653,7 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
             parsed <- nextParsed
             lastWriteTimeUtc <- nextWriteTimeUtc
             cells <- parsed.Document.Cells
+            highlightedCodeCache.Clear()
 
             selectedIndex <-
                 if cells.IsEmpty then
@@ -623,6 +681,7 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
                 parsed <- nextParsed
                 lastWriteTimeUtc <- nextWriteTimeUtc
                 cells <- parsed.Document.Cells
+                highlightedCodeCache.Clear()
 
                 selectedIndex <-
                     if cells.IsEmpty then
