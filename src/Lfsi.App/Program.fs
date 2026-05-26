@@ -83,7 +83,18 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
         else
             directory
 
-    let fsi = new FsiSession(fsiWorkingDirectory, configuration.Fsi.ExecutablePath)
+    let terminalGraphicsDecision =
+        TerminalGraphics.currentEnvironment () |> TerminalGraphics.decide
+
+    let richDisplayEnabled =
+        match terminalGraphicsDecision with
+        | UseTerminalGraphics Kitty -> true
+        | UseTerminalGraphics _
+        | UseTextFallback _ -> false
+
+    let fsi =
+        new FsiSession(fsiWorkingDirectory, configuration.Fsi.ExecutablePath, richDisplayEnabled)
+
     let quitConfirmationMessage = "Press Ctrl+C again to quit, or Esc to cancel."
     let mutable parsed = initialParsed
     let mutable lastWriteTimeUtc = initialWriteTimeUtc
@@ -373,11 +384,16 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
         let updateHighlightedCode source block =
             SyntaxHighlighting.updateTextBlock syntaxPalette (highlightedCodeSpans source) block
 
-        let visualOutputService = ChromeCdpVisualOutputService()
+        let visualOutputService =
+            if richDisplayEnabled then
+                ChromeCdpVisualOutputService() :> IVisualOutputService
+            else
+                FallbackVisualOutputService() :> IVisualOutputService
+
         let visualOutputCache = MemoryVisualOutputCache visualOutputService
 
         let imageBackend, terminalImageLayer =
-            match TerminalGraphics.currentEnvironment () |> TerminalGraphics.decide with
+            match terminalGraphicsDecision with
             | UseTerminalGraphics Kitty ->
                 let backend = KittyImageBackend()
                 backend :> ITerminalImageBackend, backend :> ITerminalImageLayer

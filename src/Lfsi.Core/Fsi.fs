@@ -15,7 +15,7 @@ type IFsiSession =
     inherit IDisposable
     abstract ExecuteAsync: code: string * cancellationToken: CancellationToken -> Task<FsiExecution>
 
-type FsiSession(?workingDirectory: string, ?executablePath: string) =
+type FsiSession(?workingDirectory: string, ?executablePath: string, ?enableRichDisplay: bool) =
     [<Literal>]
     let MimeBeginMarker = "__LFSI_MIME_BEGIN__"
 
@@ -29,6 +29,7 @@ type FsiSession(?workingDirectory: string, ?executablePath: string) =
         |> Option.filter (String.IsNullOrWhiteSpace >> not)
         |> Option.defaultValue "dotnet"
 
+    let enableRichDisplay = defaultArg enableRichDisplay true
 
     let displayHelpers =
         let escapedAssemblyPath (path: string) =
@@ -244,7 +245,8 @@ type FsiSession(?workingDirectory: string, ?executablePath: string) =
 
                         if String.IsNullOrWhiteSpace errText then
                             match tryParseMimeEnvelope cleaned with
-                            | None when hasFsiItValue cleaned -> return! tryDisplayValue code cleaned cancellationToken
+                            | None when enableRichDisplay && hasFsiItValue cleaned ->
+                                return! tryDisplayValue code cleaned cancellationToken
                             | _ ->
                                 return
                                     { Input = code
