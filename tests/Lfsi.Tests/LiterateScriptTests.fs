@@ -1,5 +1,7 @@
 namespace Lfsi.Tests
 
+open System
+open System.IO
 open Expecto
 open Lfsi.Core
 
@@ -66,4 +68,23 @@ module LiterateScriptTests =
                   let cells = (LiterateScript.parse None source).Document.Cells
 
                   Expect.equal (cells |> List.map _.Source) [ "markdown"; "\n\nlet value = 1" ] "cell sources"
-                  Expect.equal (cells |> List.map _.Kind) [ Markdown; Code ] "cell kinds" ]
+                  Expect.equal (cells |> List.map _.Kind) [ Markdown; Code ] "cell kinds"
+
+              testCase "parse does not write formatting diagnostics to console"
+              <| fun _ ->
+                  let source = "This is markdown that was converted to code."
+                  use output = new StringWriter()
+                  use error = new StringWriter()
+                  let originalOut = Console.Out
+                  let originalError = Console.Error
+
+                  try
+                      Console.SetOut output
+                      Console.SetError error
+                      LiterateScript.parse (Some "broken.fsx") source |> ignore
+                  finally
+                      Console.SetOut originalOut
+                      Console.SetError originalError
+
+                  Expect.equal (output.ToString()) "" "stdout"
+                  Expect.equal (error.ToString()) "" "stderr" ]

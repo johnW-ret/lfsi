@@ -1,6 +1,7 @@
 namespace Lfsi.Core
 
 open System
+open System.IO
 open FSharp.Formatting.Literate
 
 type LiterateParseResult =
@@ -10,6 +11,20 @@ type LiterateParseResult =
 module LiterateScript =
     let private commandCommentMarker = '*'
     let private notFoundIndex = -1
+    let private consoleOutputLock = obj ()
+
+    let private withoutConsoleOutput operation =
+        lock consoleOutputLock (fun () ->
+            let originalOut = Console.Out
+            let originalError = Console.Error
+
+            try
+                Console.SetOut(TextWriter.Null)
+                Console.SetError(TextWriter.Null)
+                operation ()
+            finally
+                Console.SetOut originalOut
+                Console.SetError originalError)
 
     let private normalizeNewlines (text: string) =
         text
@@ -148,7 +163,7 @@ module LiterateScript =
           FormattingDiagnostics =
             try
                 let parsed: LiterateDocument =
-                    Literate.ParseScriptString(source, ?path = sourcePath)
+                    withoutConsoleOutput (fun () -> Literate.ParseScriptString(source, ?path = sourcePath))
 
                 parsed.Diagnostics |> Seq.map string |> Seq.toList
             with ex ->
