@@ -10,10 +10,12 @@
 
   <ItemGroup>
     <Compile Include="LiterateScriptTests.fs" />
+    <Compile Include="OutputRenderingTests.fs" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Lfsi.Core\Lfsi.Core.fsproj" />
+    <ProjectReference Include="..\..\src\Lfsi.App\Lfsi.App.fsproj" />
   </ItemGroup>
 
   <ItemGroup>

@@ -28,6 +28,21 @@ module NativeEnvironment =
     [<DllImport("libc")>]
     extern int setenv(string name, string value, int overwrite)
 
+    [<Literal>]
+    let private StdOutputHandle = -11
+
+    [<Literal>]
+    let private EnableVirtualTerminalProcessing = 0x0004u
+
+    [<DllImport("kernel32.dll", SetLastError = true)>]
+    extern nativeint GetStdHandle(int nStdHandle)
+
+    [<DllImport("kernel32.dll", SetLastError = true)>]
+    extern bool GetConsoleMode(nativeint hConsoleHandle, uint32& lpMode)
+
+    [<DllImport("kernel32.dll", SetLastError = true)>]
+    extern bool SetConsoleMode(nativeint hConsoleHandle, uint32 dwMode)
+
     // .NET environment mutation is not visible to native getenv on Unix for some reason
     let setIfMissing name value =
         if
@@ -35,6 +50,14 @@ module NativeEnvironment =
             && (Environment.GetEnvironmentVariable(name) |> String.IsNullOrWhiteSpace)
         then
             setenv (name, value, 1) |> ignore
+
+    let enableVirtualTerminalOutput () =
+        if OperatingSystem.IsWindows() then
+            let handle = GetStdHandle StdOutputHandle
+            let mutable mode = 0u
+
+            if handle <> nativeint -1 && GetConsoleMode(handle, &mode) then
+                SetConsoleMode(handle, mode ||| EnableVirtualTerminalProcessing) |> ignore
 
 type QuitConfirmation =
     | Hidden
@@ -88,7 +111,8 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
 
     let richDisplayEnabled =
         match terminalGraphicsDecision with
-        | UseTerminalGraphics Kitty -> true
+        | UseTerminalGraphics Kitty
+        | UseTerminalGraphics Sixel -> true
         | UseTerminalGraphics _
         | UseTextFallback _ -> false
 
@@ -396,6 +420,9 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
             match terminalGraphicsDecision with
             | UseTerminalGraphics Kitty ->
                 let backend = KittyImageBackend()
+                backend :> ITerminalImageBackend, backend :> ITerminalImageLayer
+            | UseTerminalGraphics Sixel ->
+                let backend = SixelImageBackend()
                 backend :> ITerminalImageBackend, backend :> ITerminalImageLayer
             | UseTerminalGraphics protocol ->
                 let backend = FallbackTerminalImageBackend protocol
@@ -766,9 +793,9 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
         let scroll =
             ScrollViewer(Content = cellStack, Background = theme.Dark, Focusable = false)
 
-        scroll.ScrollChanged.Add(fun _ ->
-            clearTerminalImages ()
-            cellStack.InvalidateVisual())
+        scroll.ScrollChanged.Add(fun _ -> cellStack.InvalidateVisual())
+
+
 
 
         DockPanel.SetDock(header, Dock.Top)
@@ -864,20 +891,397 @@ type App(path: string, configuration: LfsiConfiguration) =
 module Program =
     let private configureTerminalEnvironment () =
         NativeEnvironment.setIfMissing NativeEnvironment.EscDelayName NativeEnvironment.DefaultEscDelay
+        NativeEnvironment.enableVirtualTerminalOutput ()
 
     let private buildApp path =
         configureTerminalEnvironment ()
         let configuration = LfsiConfiguration.load ()
 
-        AppBuilder
-            .Configure(fun () -> App(path, configuration))
-            .UseConsolonia()
-            .UseAutoDetectedConsole()
-            .LogToException()
+        let builder =
+            AppBuilder
+                .Configure(fun () -> App(path, configuration))
+                .UseConsolonia()
+
+        let builder =
+            match TerminalGraphics.currentEnvironment () |> TerminalGraphics.decide with
+            | UseTerminalGraphics Sixel ->
+                builder
+                    .UseAutoDetectConsoleColorMode()
+                    .UseAutoDetectedConsole()
+            | _ -> builder.UseAutoDetectedConsole()
+
+        builder.LogToException()
+
+    let private sixelSmoke () =
+        configureTerminalEnvironment ()
+        let backend = SixelImageBackend()
+        let width = 32
+        let height = 18
+
+        let pixels =
+            [| for y in 0 .. height - 1 do
+                   for x in 0 .. width - 1 do
+                       let red = x < width / 2
+                       yield 0uy
+                       yield (if red then 0uy else 255uy)
+                       yield (if red then 255uy else 0uy)
+                       yield 255uy |]
+
+        printfn "If Sixel is supported, a red/green block should appear below:"
+        Console.Write(backend.DiagnosticSixelSequence(width, height, pixels))
+        Console.Out.Flush()
+        printfn ""
+        0
+
+    let private sixelCanvasSmoke () =
+        configureTerminalEnvironment ()
+        let backend = SixelImageBackend()
+        let width = 640
+        let height = 360
+        let canvasColumn = 3
+        let canvasRow = 5
+        let reservedRows = 18
+
+        let pixels =
+            [| for y in 0 .. height - 1 do
+                   for x in 0 .. width - 1 do
+                       let grid = x % 80 = 0 || y % 60 = 0
+                       let axis = x = 56 || y = height - 48
+                       let lineY =
+                           let t = float x / float (width - 1)
+                           int (float (height - 72) - (sin (t * Math.PI * 3.0) * 80.0 + t * 140.0))
+
+                       let marker = abs (y - lineY) <= 3
+
+                       let r, g, b =
+                           if marker then
+                               255uy, 210uy, 64uy
+                           elif axis then
+                               220uy, 225uy, 235uy
+                           elif grid then
+                               52uy, 58uy, 76uy
+                           else
+                               12uy, 14uy, 22uy
+
+                       yield b
+                       yield g
+                       yield r
+                       yield 255uy |]
+
+        let sixel = backend.DiagnosticSixelSequence(width, height, pixels)
+
+        let writeAt row column text =
+            Console.Write(sprintf "\u001b[%d;%dH%s" row column text)
+
+        try
+            Console.Write("\u001b[?1049h\u001b[?25l\u001b[2J\u001b[H")
+            writeAt 1 1 "lfsx sixel canvas smoke"
+            writeAt 2 1 "Expected: a wide dark chart with grid lines and a yellow curve, inside the reserved canvas."
+            writeAt 3 1 "Press any key to return."
+
+            for row in 0 .. reservedRows - 1 do
+                writeAt (canvasRow + row) canvasColumn (String(' ', 80))
+
+            writeAt canvasRow canvasColumn ""
+            Console.Write(sixel)
+            Console.Out.Flush()
+            Console.ReadKey(true) |> ignore
+            0
+        finally
+            Console.Write("\u001b[?25h\u001b[?1049l")
+            Console.Out.Flush()
+
+
+    /// Capture mode: write all escape sequences to a log file for analysis
+    let private sixelCaptureDiag () =
+        configureTerminalEnvironment ()
+        let capturePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "sixel-capture.bin")
+        let logPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "sixel-capture.log")
+        let log = new StreamWriter(logPath, false, System.Text.Encoding.UTF8)
+        log.AutoFlush <- true
+
+        let backend = SixelImageBackend()
+        let width = 200
+        let height = 120
+        let pixels =
+            [| for y in 0 .. height - 1 do
+                   for x in 0 .. width - 1 do
+                       let r = byte (x * 255 / width)
+                       let g = byte (y * 255 / height)
+                       let b = 128uy
+                       yield b; yield g; yield r; yield 255uy |]
+
+        let sixel = backend.DiagnosticSixelSequence(width, height, pixels)
+        log.WriteLine(sprintf "Sixel data length: %d chars" sixel.Length)
+
+        // Build the EXACT sequence that the Consolonia + our control would send
+        let totalOutput = System.Text.StringBuilder()
+
+        // === Phase 1: Consolonia PrepareConsole ===
+        totalOutput.Append("\u001b[?1049h") |> ignore // EnableAlternateBuffer
+        // Consolonia does emoji test here but we skip it
+        // BlackColorTTYWorkaround:
+        totalOutput.Append("\u001b[36m\u001b[46m \u001b[30m\u001b[40m") |> ignore
+        // ClearScreen:
+        totalOutput.Append("\u001b[2J\u001b[1;1f") |> ignore
+
+        // === Phase 2: Consolonia RenderToDevice ===
+        // HideCaret (note: in real Consolonia this is a separate Flush)
+        totalOutput.Append("\u001b[?25l") |> ignore
+
+        // Write cells across the screen (simplified - just the canvas area)
+        let canvasRow = 5
+        let canvasCol = 3
+        let canvasWidth = 30
+        let reservedRows = 8
+
+        // Write some text above
+        totalOutput.Append(sprintf "\u001b[1;1f") |> ignore
+        totalOutput.Append("\u001b[38;2;220;220;220m\u001b[48;2;30;30;40m") |> ignore
+        totalOutput.Append("Consolonia simulation output") |> ignore
+
+        // Write blank cells in the canvas area (like Consolonia rendering the RawSixelImageControl background)
+        for row in 0 .. reservedRows - 1 do
+            for col in 0 .. canvasWidth - 1 do
+                totalOutput.Append(sprintf "\u001b[%d;%df" (canvasRow + row) (canvasCol + col)) |> ignore
+                totalOutput.Append("\u001b[48;2;25;25;35m\u001b[38;2;25;25;35m") |> ignore
+                totalOutput.Append(' ') |> ignore
+
+        // Consolonia Flush (single Console.Write)
+        // Then ShowCaret or HideCaret at end of render
+        totalOutput.Append("\u001b[?25l") |> ignore // HideCaret again (as in real Consolonia)
+
+        log.WriteLine(sprintf "Consolonia render buffer: %d chars" totalOutput.Length)
+
+        // === Phase 3: Our RawSixelImageControl.emit (fires at Background priority AFTER render) ===
+        let sixelWrite = sprintf "\u001b7\u001b[%d;%dH%s\u001b8" canvasRow canvasCol sixel
+        log.WriteLine(sprintf "Sixel write: %d chars" sixelWrite.Length)
+        log.WriteLine(sprintf "Sixel write prefix: %s" (sixelWrite.Substring(0, Math.Min(120, sixelWrite.Length)).Replace("\u001b", "<ESC>")))
+
+        // Append sixel write to total output (in reality this is a separate Console.Write call)
+        totalOutput.Append(sixelWrite) |> ignore
+
+        log.WriteLine(sprintf "Total output: %d chars" totalOutput.Length)
+
+        // Write the binary capture
+        let outputStr = totalOutput.ToString()
+        File.WriteAllText(capturePath, outputStr, System.Text.Encoding.UTF8)
+        log.WriteLine(sprintf "Wrote capture to: %s" capturePath)
+
+        // Analyze the sequence for potential issues
+        log.WriteLine("")
+        log.WriteLine("=== ANALYSIS ===")
+
+        // Check: does the sixel DCS start correctly?
+        let sixelStart = outputStr.IndexOf("\u001bPq")
+        let sixelEnd = outputStr.IndexOf("\u001b\\", sixelStart + 1)
+        log.WriteLine(sprintf "Sixel DCS starts at offset: %d" sixelStart)
+        log.WriteLine(sprintf "Sixel DCS ends at offset: %d (ST)" sixelEnd)
+        log.WriteLine(sprintf "Total output length: %d" outputStr.Length)
+
+        // Check: what's immediately before the sixel DCS?
+        if sixelStart > 0 then
+            let before = outputStr.Substring(Math.Max(0, sixelStart - 30), Math.Min(30, sixelStart))
+            log.WriteLine(sprintf "30 chars before DCS: %s" (before.Replace("\u001b", "<ESC>")))
+
+        // Check: what's after the sixel DCS?
+        if sixelEnd >= 0 && sixelEnd + 2 < outputStr.Length then
+            let after = outputStr.Substring(sixelEnd, Math.Min(30, outputStr.Length - sixelEnd))
+            log.WriteLine(sprintf "30 chars after ST: %s" (after.Replace("\u001b", "<ESC>")))
+
+        // Check: are there any escape sequences INSIDE the sixel DCS that shouldn't be there?
+        let sixelBody = outputStr.Substring(sixelStart + 3, sixelEnd - sixelStart - 3)
+        let escInSixel = sixelBody.Split('\u001b').Length - 1
+        log.WriteLine(sprintf "ESC characters inside sixel body: %d (should be 0)" escInSixel)
+
+        // Check: the raster attributes
+        let rasterAttrStart = sixelBody.IndexOf('"')
+        if rasterAttrStart >= 0 then
+            let rasterAttrEnd = sixelBody.IndexOf('#', rasterAttrStart)
+            if rasterAttrEnd > rasterAttrStart then
+                let rasterAttrs = sixelBody.Substring(rasterAttrStart, rasterAttrEnd - rasterAttrStart)
+                log.WriteLine(sprintf "Raster attributes: %s" rasterAttrs)
+
+        log.WriteLine("")
+        log.WriteLine("=== DONE ===")
+        log.Close()
+        eprintfn "Capture written to: %s" capturePath
+        eprintfn "Log written to: %s" logPath
+        0
+
+    /// Diagnostic: simulates the Consolonia terminal state and tests sixel rendering
+    /// in multiple configurations to isolate why sixel breaks inside Consolonia.
+    let private sixelConsoloniaDiag () =
+        configureTerminalEnvironment ()
+        let logPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "sixel-diag.log")
+        let log = new StreamWriter(logPath, false, System.Text.Encoding.UTF8)
+        log.AutoFlush <- true
+        log.WriteLine("=== sixel-consolonia-diag started ===")
+        log.WriteLine(sprintf "Terminal: %s" (Environment.GetEnvironmentVariable("TERM_PROGRAM") |> Option.ofObj |> Option.defaultValue "unknown"))
+        log.WriteLine(sprintf "WT_SESSION: %s" (Environment.GetEnvironmentVariable("WT_SESSION") |> Option.ofObj |> Option.defaultValue "not set"))
+        try log.WriteLine(sprintf "Console size: %dx%d" Console.WindowWidth Console.WindowHeight) with _ -> log.WriteLine("Console size: unavailable")
+
+        let backend = SixelImageBackend()
+        let width = 200
+        let height = 120
+        let pixels =
+            [| for y in 0 .. height - 1 do
+                   for x in 0 .. width - 1 do
+                       let r = byte (x * 255 / width)
+                       let g = byte (y * 255 / height)
+                       let b = 128uy
+                       yield b; yield g; yield r; yield 255uy |]
+
+        let sixel = backend.DiagnosticSixelSequence(width, height, pixels)
+        log.WriteLine(sprintf "Sixel data length: %d bytes" sixel.Length)
+        log.WriteLine(sprintf "Sixel starts with: %s" (sixel.Substring(0, Math.Min(80, sixel.Length)).Replace("\u001b", "<ESC>")))
+        log.WriteLine(sprintf "Sixel ends with: %s" (sixel.Substring(Math.Max(0, sixel.Length - 20)).Replace("\u001b", "<ESC>")))
+
+        let writeAt row col (text: string) =
+            Console.Write(sprintf "\u001b[%d;%dH%s" row col text)
+
+        let canvasRow = 5
+        let canvasCol = 3
+        let reservedRows = 8
+        let canvasWidth = 30 // approximate cell width for the image
+
+        try
+            // ===== TEST A: Baseline sixel (like smoke test) =====
+            Console.Write("\u001b[?1049h\u001b[?25l\u001b[2J\u001b[H")
+            writeAt 1 1 "TEST A: Baseline sixel (same as smoke test)"
+            writeAt 2 1 "Expected: gradient rectangle at row 5, col 3"
+            writeAt 3 1 "[Press any key for next test]"
+            // Position cursor and write sixel directly
+            writeAt canvasRow canvasCol ""
+            Console.Write(sixel)
+            Console.Out.Flush()
+            log.WriteLine("TEST A: Wrote sixel directly after CUP. No SGR state.")
+            Console.ReadKey(true) |> ignore
+
+            // ===== TEST B: SGR state before sixel =====
+            Console.Write("\u001b[2J\u001b[H")
+            writeAt 1 1 "TEST B: Set SGR fg/bg colors, then write sixel"
+            writeAt 2 1 "Expected: same gradient rectangle (SGR should not affect sixel)"
+            writeAt 3 1 "[Press any key for next test]"
+            // Set some SGR state like Consolonia would
+            Console.Write("\u001b[38;2;255;0;0m")  // red foreground
+            Console.Write("\u001b[48;2;0;0;255m")  // blue background
+            Console.Write("\u001b[1m")              // bold
+            // Now position and write sixel
+            writeAt canvasRow canvasCol ""
+            Console.Write(sixel)
+            Console.Out.Flush()
+            Console.Write("\u001b[0m")  // reset SGR
+            log.WriteLine("TEST B: Set SGR (red fg, blue bg, bold), then wrote sixel.")
+            Console.ReadKey(true) |> ignore
+
+            // ===== TEST C: Fill area with colored cells (like Consolonia), then sixel with DECSC/DECRC =====
+            Console.Write("\u001b[2J\u001b[H")
+            writeAt 1 1 "TEST C: Fill canvas area with colored cells (like Consolonia render), then sixel with DECSC/DECRC"
+            writeAt 2 1 "Expected: gradient rectangle overlaying the colored cells"
+            writeAt 3 1 "[Press any key for next test]"
+            // Simulate Consolonia writing colored cells to the canvas area
+            for row in 0 .. reservedRows - 1 do
+                Console.Write(sprintf "\u001b[%d;%df" (canvasRow + row) canvasCol) // CUP using 'f' like Consolonia
+                Console.Write("\u001b[38;2;200;200;200m")  // light gray foreground
+                Console.Write("\u001b[48;2;30;30;50m")     // dark blue background
+                Console.Write(String('.', canvasWidth))
+            Console.Out.Flush()
+            log.WriteLine("TEST C: Filled canvas area with SGR-colored cells using 'f' cursor positioning.")
+            // Now write sixel with DECSC/DECRC (like our RawSixelImageControl)
+            Console.Write(sprintf "\u001b7\u001b[%d;%dH%s\u001b8" canvasRow canvasCol sixel)
+            Console.Out.Flush()
+            log.WriteLine("TEST C: Wrote sixel with DECSC/DECRC wrapping.")
+            Console.ReadKey(true) |> ignore
+
+            // ===== TEST D: Fill area, sixel, then fill area again (simulating render loop overwrite) =====
+            Console.Write("\u001b[2J\u001b[H")
+            writeAt 1 1 "TEST D: Fill area + sixel + fill area again (simulates Consolonia re-render)"
+            writeAt 2 1 "Expected: colored dots OVER the sixel (sixel should be destroyed)"
+            writeAt 3 1 "[Press any key for next test]"
+            // Fill area
+            for row in 0 .. reservedRows - 1 do
+                Console.Write(sprintf "\u001b[%d;%df" (canvasRow + row) canvasCol)
+                Console.Write("\u001b[48;2;30;30;50m")
+                Console.Write(String(' ', canvasWidth))
+            Console.Out.Flush()
+            // Write sixel
+            Console.Write(sprintf "\u001b7\u001b[%d;%dH%s\u001b8" canvasRow canvasCol sixel)
+            Console.Out.Flush()
+            // Now simulate Consolonia re-rendering: write cells over the sixel area
+            for row in 0 .. reservedRows - 1 do
+                Console.Write(sprintf "\u001b[%d;%df" (canvasRow + row) canvasCol)
+                Console.Write("\u001b[38;2;255;255;0m")
+                Console.Write("\u001b[48;2;30;30;50m")
+                Console.Write(String('X', canvasWidth))
+            Console.Out.Flush()
+            log.WriteLine("TEST D: Fill + Sixel + Fill again. Sixel should be overwritten.")
+            Console.ReadKey(true) |> ignore
+
+            // ===== TEST E: Fill area, then sixel WITHOUT DECSC/DECRC =====
+            Console.Write("\u001b[2J\u001b[H")
+            writeAt 1 1 "TEST E: Fill area with Consolonia-style cells, then sixel WITHOUT save/restore"
+            writeAt 2 1 "Expected: gradient rectangle. Check if cursor position is wrong after."
+            writeAt 3 1 "[Press any key for next test]"
+            for row in 0 .. reservedRows - 1 do
+                Console.Write(sprintf "\u001b[%d;%df" (canvasRow + row) canvasCol)
+                Console.Write("\u001b[48;2;30;30;50m")
+                Console.Write(String(' ', canvasWidth))
+            Console.Out.Flush()
+            // Reset SGR before sixel
+            Console.Write("\u001b[0m")
+            writeAt canvasRow canvasCol ""
+            Console.Write(sixel)
+            Console.Out.Flush()
+            // Now write text AFTER sixel to see where cursor ended up
+            Console.Write("\u001b[0m")
+            Console.Write(" <-- cursor landed here after sixel")
+            Console.Out.Flush()
+            log.WriteLine("TEST E: Wrote sixel without DECSC/DECRC to see cursor position after.")
+            Console.ReadKey(true) |> ignore
+
+            // ===== TEST F: Consolonia-exact simulation with buffered output =====
+            Console.Write("\u001b[2J\u001b[H")
+            writeAt 1 1 "TEST F: Exact Consolonia simulation (buffered render + separate sixel write)"
+            writeAt 2 1 "Expected: gradient rectangle at canvas position"
+            writeAt 3 1 "[Press any key to exit]"
+            // Simulate Consolonia's RenderToDevice: build a buffer of escape sequences
+            let buf = System.Text.StringBuilder()
+            buf.Append("\u001b[?25l") |> ignore  // HideCaret (with flush in real Consolonia)
+            // Write cells in the canvas area (like Consolonia would for blank reserved rows)
+            for row in 0 .. reservedRows - 1 do
+                for col in 0 .. canvasWidth - 1 do
+                    // SetCaretPosition (Consolonia uses 'f' for HVP)
+                    buf.Append(sprintf "\u001b[%d;%df" (canvasRow + row) (canvasCol + col)) |> ignore
+                    // Background color
+                    buf.Append("\u001b[48;2;25;25;35m") |> ignore
+                    // Foreground color
+                    buf.Append("\u001b[38;2;25;25;35m") |> ignore
+                    // Write space character
+                    buf.Append(' ') |> ignore
+            // Flush the entire buffer at once (like Consolonia)
+            Console.Write(buf.ToString())
+            log.WriteLine(sprintf "TEST F: Consolonia buffer size: %d chars" (buf.Length))
+            // Now write sixel (like our RawSixelImageControl.emit at Background priority)
+            Console.Write(sprintf "\u001b7\u001b[%d;%dH%s\u001b8" canvasRow canvasCol sixel)
+            Console.Out.Flush()
+            log.WriteLine("TEST F: Wrote sixel after Consolonia-style buffered render.")
+            Console.ReadKey(true) |> ignore
+
+            log.WriteLine("=== All tests completed ===")
+            log.Close()
+            0
+        finally
+            Console.Write("\u001b[0m\u001b[?25h\u001b[?1049l")
+            Console.Out.Flush()
 
     [<EntryPoint>]
     let main argv =
         match argv |> Array.toList with
+        | "--sixel-smoke" :: _ -> sixelSmoke ()
+        | "--sixel-canvas-smoke" :: _ -> sixelCanvasSmoke ()
+        | "--sixel-consolonia-diag" :: _ -> sixelConsoloniaDiag ()
+        | "--sixel-capture-diag" :: _ -> sixelCaptureDiag ()
         | "--html" :: file :: _ when File.Exists file ->
             let html = LiterateScript.toHtml (Some file) (File.ReadAllText file)
             printf "%s" html
