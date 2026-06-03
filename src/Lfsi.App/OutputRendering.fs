@@ -19,6 +19,7 @@ open Avalonia.Media.Imaging
 open Avalonia.Threading
 open Avalonia.VisualTree
 open Lfsi.Core
+open Microsoft.Win32
 
 type NotebookTheme =
     { Dark: SolidColorBrush
@@ -64,11 +65,57 @@ type FallbackVisualOutputService() =
             HtmlUnsupported "HTML output detected; Chrome/CDP visual rendering is not enabled yet."
 
 module ChromeDiscovery =
+    let private notEmpty value =
+        value
+        |> Option.ofObj
+        |> Option.filter (String.IsNullOrWhiteSpace >> not)
+
+    let private existingFile path =
+        path
+        |> notEmpty
+        |> Option.filter File.Exists
+
+    let private registryPath key =
+        try
+            Registry.GetValue(key, "", null) :?> string |> existingFile
+        with _ ->
+            None
+
+    let private windowsChromeCandidates () =
+        let pathFromEnv name suffix =
+            Environment.GetEnvironmentVariable name
+            |> notEmpty
+            |> Option.map (fun root -> Path.Combine(root, suffix))
+
+        [ registryPath @"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe"
+          registryPath @"HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe"
+          registryPath @"HKEY_LOCAL_MACHINE\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe"
+          pathFromEnv "ProgramFiles" @"Google\Chrome\Application\chrome.exe"
+          pathFromEnv "ProgramFiles(x86)" @"Google\Chrome\Application\chrome.exe"
+          pathFromEnv "LocalAppData" @"Google\Chrome\Application\chrome.exe" ]
+        |> List.choose id
+
+    let resolveChromePath path =
+        match existingFile path with
+        | Some path -> Some path
+        | None when OperatingSystem.IsWindows() ->
+            let name = Path.GetFileName(path)
+
+            if
+                name.Equals("chrome", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("chrome.exe", StringComparison.OrdinalIgnoreCase)
+            then
+                windowsChromeCandidates () |> List.tryHead
+            else
+                None
+        | None when path = "google-chrome" || path = "chrome" || path = "chrome.exe" -> Some path
+        | None -> None
+
     let defaultChromePath () =
         if OperatingSystem.IsMacOS() then
             "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
         elif OperatingSystem.IsWindows() then
-            "chrome.exe"
+            windowsChromeCandidates () |> List.tryHead |> Option.defaultValue "chrome.exe"
         else
             "google-chrome"
 
@@ -174,10 +221,17 @@ type ChromeCdpVisualOutputService(?chromePath: string, ?viewportWidth: int, ?vie
             let expression =
                 """
 (() => {
-  const target = document.body.firstElementChild || document.body;
-  const rect = target.getBoundingClientRect();
-  const width = Math.max(1, Math.ceil(rect.width || document.documentElement.scrollWidth || document.body.scrollWidth || 640));
-  const height = Math.max(1, Math.ceil(rect.height || document.documentElement.scrollHeight || document.body.scrollHeight || 360));
+  const candidates = [
+    ...document.querySelectorAll('svg, canvas, img, video, object, embed, iframe, body > div, body')
+  ];
+  const rects = candidates
+    .map(element => element.getBoundingClientRect())
+    .filter(rect => rect.width >= 100 && rect.height >= 100);
+  const rect = rects
+    .sort((a, b) => (b.width * b.height) - (a.width * a.height))[0]
+    || document.body.getBoundingClientRect();
+  const width = Math.min(1600, Math.max(640, Math.ceil(rect.width || document.documentElement.scrollWidth || document.body.scrollWidth || 640)));
+  const height = Math.min(1200, Math.max(360, Math.ceil(rect.height || document.documentElement.scrollHeight || document.body.scrollHeight || 360)));
   return JSON.stringify({
     x: Math.max(0, Math.floor(rect.left)),
     y: Math.max(0, Math.floor(rect.top)),
@@ -207,7 +261,13 @@ type ChromeCdpVisualOutputService(?chromePath: string, ?viewportWidth: int, ?vie
         task {
             let expression =
                 """
-(() => !!document.querySelector('svg, canvas'))()
+(() => {
+  const candidates = document.querySelectorAll('svg, canvas, img, video, object, embed, iframe');
+  return [...candidates].some(element => {
+    const rect = element.getBoundingClientRect();
+    return rect.width >= 100 && rect.height >= 100;
+  });
+})()
 """
 
             let evaluateParams =
@@ -241,16 +301,10 @@ type ChromeCdpVisualOutputService(?chromePath: string, ?viewportWidth: int, ?vie
 
     let renderHtmlAsync html =
         task {
-            if
-                String.IsNullOrWhiteSpace chromePath
-                || not (
-                    File.Exists chromePath
-                    || chromePath = "chrome.exe"
-                    || chromePath = "google-chrome"
-                )
-            then
+            match ChromeDiscovery.resolveChromePath chromePath with
+            | None ->
                 return HtmlUnsupported(sprintf "Chrome executable was not found at '%s'." chromePath)
-            else
+            | Some resolvedChromePath ->
                 let port = availablePort ()
 
                 let userDataDir =
@@ -262,96 +316,104 @@ type ChromeCdpVisualOutputService(?chromePath: string, ?viewportWidth: int, ?vie
                 Directory.CreateDirectory(userDataDir) |> ignore
                 File.WriteAllText(htmlPath, htmlDocument html)
 
-                let startInfo =
-                    ProcessStartInfo(
-                        FileName = chromePath,
-                        Arguments =
-                            String.concat
-                                " "
-                                [ "--headless=new"
-                                  "--disable-gpu"
-                                  "--hide-scrollbars"
-                                  "--no-first-run"
-                                  "--no-default-browser-check"
-                                  sprintf "--remote-debugging-port=%d" port
-                                  sprintf "--user-data-dir=%s" userDataDir
-                                  "about:blank" ],
-                        UseShellExecute = false,
-                        RedirectStandardError = true,
-                        RedirectStandardOutput = true,
-                        CreateNoWindow = true
-                    )
-
-                use proc = Process.Start(startInfo)
-
                 let! renderResult =
                     task {
-                        use timeout = new CancellationTokenSource(TimeSpan.FromSeconds 12.0)
-                        let cancellationToken = timeout.Token
-
                         try
-                            let! wsUrl = browserWebSocket port
-                            use socket = new ClientWebSocket()
-                            do! socket.ConnectAsync(Uri(wsUrl), cancellationToken)
+                            let startInfo =
+                                ProcessStartInfo(
+                                    FileName = resolvedChromePath,
+                                    Arguments =
+                                        String.concat
+                                            " "
+                                            [ "--headless=new"
+                                              "--disable-gpu"
+                                              "--hide-scrollbars"
+                                              "--no-first-run"
+                                              "--no-default-browser-check"
+                                              sprintf "--remote-debugging-port=%d" port
+                                              sprintf "--user-data-dir=%s" userDataDir
+                                              "about:blank" ],
+                                    UseShellExecute = false,
+                                    RedirectStandardError = true,
+                                    RedirectStandardOutput = true,
+                                    CreateNoWindow = true
+                                )
 
-                            let! _ = sendCommand socket 1 "Page.enable" "{}" cancellationToken
-                            let! _ = sendCommand socket 2 "Runtime.enable" "{}" cancellationToken
+                            let mutable proc = Unchecked.defaultof<Process>
 
-                            let viewportParams =
-                                sprintf
-                                    """{"width":%d,"height":%d,"deviceScaleFactor":1,"mobile":false}"""
-                                    viewportWidth
-                                    viewportHeight
+                            try
+                                proc <- Process.Start(startInfo)
+                                use timeout = new CancellationTokenSource(TimeSpan.FromSeconds 12.0)
+                                let cancellationToken = timeout.Token
 
-                            let! _ =
-                                sendCommand
-                                    socket
-                                    3
-                                    "Emulation.setDeviceMetricsOverride"
-                                    viewportParams
-                                    cancellationToken
+                                let! wsUrl = browserWebSocket port
+                                use socket = new ClientWebSocket()
+                                do! socket.ConnectAsync(Uri(wsUrl), cancellationToken)
 
-                            let fileUrl = Uri(htmlPath).AbsoluteUri
-                            let navigateParams = sprintf """{"url":%s}""" (JsonSerializer.Serialize(fileUrl))
-                            let! _ = sendCommand socket 4 "Page.navigate" navigateParams cancellationToken
+                                let! _ = sendCommand socket 1 "Page.enable" "{}" cancellationToken
+                                let! _ = sendCommand socket 2 "Runtime.enable" "{}" cancellationToken
 
-                            let! nextCommandId = waitForVisualRender socket 5 cancellationToken
-                            let! screenshotParams = contentClipParams socket (nextCommandId + 1) cancellationToken
+                                let viewportParams =
+                                    sprintf
+                                        """{"width":%d,"height":%d,"deviceScaleFactor":1,"mobile":false}"""
+                                        viewportWidth
+                                        viewportHeight
 
-                            let! screenshotResponse =
-                                sendCommand
-                                    socket
-                                    (nextCommandId + 2)
-                                    "Page.captureScreenshot"
-                                    screenshotParams
-                                    cancellationToken
+                                let! _ =
+                                    sendCommand
+                                        socket
+                                        3
+                                        "Emulation.setDeviceMetricsOverride"
+                                        viewportParams
+                                        cancellationToken
 
-                            use document = JsonDocument.Parse(screenshotResponse)
-                            let root = document.RootElement
-                            let mutable errorProperty = Unchecked.defaultof<JsonElement>
+                                let fileUrl = Uri(htmlPath).AbsoluteUri
+                                let navigateParams = sprintf """{"url":%s}""" (JsonSerializer.Serialize(fileUrl))
+                                let! _ = sendCommand socket 4 "Page.navigate" navigateParams cancellationToken
 
-                            if root.TryGetProperty("error", &errorProperty) then
-                                return
-                                    HtmlUnsupported(
-                                        "Chrome/CDP rendering failed: "
-                                        + errorProperty.GetProperty("message").GetString()
-                                    )
-                            else
-                                let data = root.GetProperty("result").GetProperty("data").GetString()
-                                let bytes = Convert.FromBase64String(data)
+                                let! nextCommandId = waitForVisualRender socket 5 cancellationToken
+                                let! screenshotParams = contentClipParams socket (nextCommandId + 1) cancellationToken
 
-                                return
-                                    HtmlFrame
-                                        { MimeType = MimeTypes.Png
-                                          Bytes = bytes }
+                                let! screenshotResponse =
+                                    sendCommand
+                                        socket
+                                        (nextCommandId + 2)
+                                        "Page.captureScreenshot"
+                                        screenshotParams
+                                        cancellationToken
+
+                                use document = JsonDocument.Parse(screenshotResponse)
+                                let root = document.RootElement
+                                let mutable errorProperty = Unchecked.defaultof<JsonElement>
+
+                                if root.TryGetProperty("error", &errorProperty) then
+                                    return
+                                        HtmlUnsupported(
+                                            "Chrome/CDP rendering failed: "
+                                            + errorProperty.GetProperty("message").GetString()
+                                        )
+                                else
+                                    let data = root.GetProperty("result").GetProperty("data").GetString()
+                                    let bytes = Convert.FromBase64String(data)
+
+                                    return
+                                        HtmlFrame
+                                            { MimeType = MimeTypes.Png
+                                              Bytes = bytes }
+                            finally
+                                try
+                                    if not (isNull proc) && not proc.HasExited then
+                                        proc.Kill true
+                                with _ ->
+                                    ()
+
+                                if not (isNull proc) then
+                                    proc.Dispose()
                         with ex ->
                             return HtmlUnsupported("Chrome/CDP rendering failed: " + ex.Message)
                     }
 
                 try
-                    if not proc.HasExited then
-                        proc.Kill true
-
                     File.Delete htmlPath
                     Directory.Delete(userDataDir, true)
                 with _ ->
