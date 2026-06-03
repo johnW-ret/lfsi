@@ -3,10 +3,14 @@ namespace Lfsi.Tests
 open System
 open System.IO
 open System.IO.Compression
+open Avalonia.Controls
 open Expecto
 open Lfsi.App
+open Lfsi.Core
 
 module OutputRenderingTests =
+    let private bgra b g r a = [| b; g; r; a |] |> Array.map byte
+
     let private int32BigEndian (bytes: byte[]) offset =
         (int bytes[offset] <<< 24)
         ||| (int bytes[offset + 1] <<< 16)
@@ -72,8 +76,12 @@ module OutputRenderingTests =
 
             for x in 0 .. stride - 1 do
                 let raw = int filtered[sourceOffset + x]
-                let left = if x >= channels then int pixels[rowOffset + x - channels] else 0
-                let up = if y > 0 then int pixels[previousRowOffset + x] else 0
+
+                let left =
+                    if x >= channels then int pixels[rowOffset + x - channels] else 0
+
+                let up =
+                    if y > 0 then int pixels[previousRowOffset + x] else 0
 
                 let upperLeft =
                     if y > 0 && x >= channels then int pixels[previousRowOffset + x - channels] else 0
@@ -101,11 +109,103 @@ module OutputRenderingTests =
             && (px[0] <> 24uy || px[1] <> 24uy || px[2] <> 24uy)
             && (channels = 3 || px[3] <> 0uy))
 
+    let private pngChunk (name: string) (data: byte[]) =
+        [| let length = data.Length
+           yield byte ((length >>> 24) &&& 0xFF)
+           yield byte ((length >>> 16) &&& 0xFF)
+           yield byte ((length >>> 8) &&& 0xFF)
+           yield byte (length &&& 0xFF)
+           yield! Text.Encoding.ASCII.GetBytes name
+           yield! data
+           yield 0uy
+           yield 0uy
+           yield 0uy
+           yield 0uy |]
+
+    let private tinyRgbPng () =
+        let width = 2
+        let height = 2
+
+        let ihdr =
+            [| yield byte 0
+               yield byte 0
+               yield byte 0
+               yield byte width
+               yield byte 0
+               yield byte 0
+               yield byte 0
+               yield byte height
+               yield 8uy
+               yield 2uy
+               yield 0uy
+               yield 0uy
+               yield 0uy |]
+
+        let raw =
+            [| yield 0uy
+               yield 255uy
+               yield 0uy
+               yield 0uy
+               yield 0uy
+               yield 255uy
+               yield 0uy
+               yield 0uy
+               yield 0uy
+               yield 0uy
+               yield 0uy
+               yield 255uy
+               yield 255uy
+               yield 255uy |]
+
+        use compressed = new MemoryStream()
+
+        do
+            use zlib = new ZLibStream(compressed, CompressionMode.Compress, true)
+            zlib.Write raw
+
+        [| yield! [| 0x89uy; 0x50uy; 0x4Euy; 0x47uy; 0x0Duy; 0x0Auy; 0x1Auy; 0x0Auy |]
+           yield! pngChunk "IHDR" ihdr
+           yield! pngChunk "IDAT" (compressed.ToArray())
+           yield! pngChunk "IEND" Array.empty |]
+
     [<Tests>]
     let tests =
         testList
             "OutputRendering"
-            [ testCase "chrome renderer captures a nonblank generic SVG element"
+            [ testCase "sixel encoder emits a visible local-palette image"
+              <| fun _ ->
+                  let backend = SixelImageBackend()
+
+                  let pixels =
+                      [ for _ in 1..6 do
+                            yield! bgra 0 0 255 255
+                            yield! bgra 0 255 0 255 ]
+                      |> Array.ofList
+
+                  let sixel = backend.DiagnosticSixelSequence(2, 6, pixels)
+
+                  Expect.stringStarts sixel "\u001bPq" "starts sixel DCS"
+                  Expect.stringEnds sixel "\u001b\\" "ends sixel DCS"
+                  Expect.stringContains sixel ";2;100;0;0" "defines red in the local palette"
+                  Expect.stringContains sixel ";2;0;100;0" "defines green in the local palette"
+                  Expect.stringContains sixel "~" "emits full sixel columns"
+
+              testCase "sixel backend reserves chart-height output for tiny renders"
+              <| fun _ ->
+                  let backend = SixelImageBackend()
+                  Expect.equal (backend.DiagnosticReservedRows 1) 18 "minimum reserved rows"
+
+              testCase "sixel backend renders app output through raw terminal placement"
+              <| fun _ ->
+                  let backend = SixelImageBackend() :> ITerminalImageBackend
+
+                  match backend.RenderImage { MimeType = MimeTypes.Png; Bytes = tinyRgbPng () } with
+                  | Some control ->
+                      Expect.isGreaterThanOrEqual control.Height 1.0 "image control reserves terminal rows"
+                      Expect.isFalse (control :? TextBlock) "image rendering is emitted as raw terminal graphics"
+                  | None -> failtest "Expected PNG image to render."
+
+              testCase "chrome renderer captures a nonblank generic SVG element"
               <| fun _ ->
                   match ChromeDiscovery.resolveChromePath (ChromeDiscovery.defaultChromePath ()) with
                   | None -> printfn "Skipping Chrome render check because Chrome was not found."
@@ -128,4 +228,14 @@ module OutputRenderingTests =
                           Expect.isGreaterThanOrEqual height 360 "screenshot height"
                           Expect.isTrue
                               (hasNonBackgroundPixel channels pixels)
-                              "screenshot has visible non-background pixels" ]
+                              "screenshot has visible non-background pixels"
+
+                          let backend = SixelImageBackend()
+
+                          match backend.DiagnosticSixelSequenceFromPng frame.Bytes with
+                          | None -> failtest "Sixel backend could not decode Chrome PNG output."
+                          | Some sixel ->
+                              Expect.stringContains
+                                  sixel
+                                  ";2;100;0;0"
+                                  "generic SVG Chrome PNG remains visibly red after Sixel backend decoding" ]

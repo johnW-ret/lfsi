@@ -28,6 +28,21 @@ module NativeEnvironment =
     [<DllImport("libc")>]
     extern int setenv(string name, string value, int overwrite)
 
+    [<Literal>]
+    let private StdOutputHandle = -11
+
+    [<Literal>]
+    let private EnableVirtualTerminalProcessing = 0x0004u
+
+    [<DllImport("kernel32.dll", SetLastError = true)>]
+    extern nativeint GetStdHandle(int nStdHandle)
+
+    [<DllImport("kernel32.dll", SetLastError = true)>]
+    extern bool GetConsoleMode(nativeint hConsoleHandle, uint32& lpMode)
+
+    [<DllImport("kernel32.dll", SetLastError = true)>]
+    extern bool SetConsoleMode(nativeint hConsoleHandle, uint32 dwMode)
+
     // .NET environment mutation is not visible to native getenv on Unix for some reason
     let setIfMissing name value =
         if
@@ -35,6 +50,14 @@ module NativeEnvironment =
             && (Environment.GetEnvironmentVariable(name) |> String.IsNullOrWhiteSpace)
         then
             setenv (name, value, 1) |> ignore
+
+    let enableVirtualTerminalOutput () =
+        if OperatingSystem.IsWindows() then
+            let handle = GetStdHandle StdOutputHandle
+            let mutable mode = 0u
+
+            if handle <> nativeint -1 && GetConsoleMode(handle, &mode) then
+                SetConsoleMode(handle, mode ||| EnableVirtualTerminalProcessing) |> ignore
 
 type QuitConfirmation =
     | Hidden
@@ -88,7 +111,8 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
 
     let richDisplayEnabled =
         match terminalGraphicsDecision with
-        | UseTerminalGraphics Kitty -> true
+        | UseTerminalGraphics Kitty
+        | UseTerminalGraphics Sixel -> true
         | UseTerminalGraphics _
         | UseTextFallback _ -> false
 
@@ -396,6 +420,9 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
             match terminalGraphicsDecision with
             | UseTerminalGraphics Kitty ->
                 let backend = KittyImageBackend()
+                backend :> ITerminalImageBackend, backend :> ITerminalImageLayer
+            | UseTerminalGraphics Sixel ->
+                let backend = SixelImageBackend()
                 backend :> ITerminalImageBackend, backend :> ITerminalImageLayer
             | UseTerminalGraphics protocol ->
                 let backend = FallbackTerminalImageBackend protocol
@@ -766,9 +793,9 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
         let scroll =
             ScrollViewer(Content = cellStack, Background = theme.Dark, Focusable = false)
 
-        scroll.ScrollChanged.Add(fun _ ->
-            clearTerminalImages ()
-            cellStack.InvalidateVisual())
+        scroll.ScrollChanged.Add(fun _ -> cellStack.InvalidateVisual())
+
+
 
 
         DockPanel.SetDock(header, Dock.Top)
@@ -864,16 +891,26 @@ type App(path: string, configuration: LfsiConfiguration) =
 module Program =
     let private configureTerminalEnvironment () =
         NativeEnvironment.setIfMissing NativeEnvironment.EscDelayName NativeEnvironment.DefaultEscDelay
+        NativeEnvironment.enableVirtualTerminalOutput ()
 
     let private buildApp path =
         configureTerminalEnvironment ()
         let configuration = LfsiConfiguration.load ()
 
-        AppBuilder
-            .Configure(fun () -> App(path, configuration))
-            .UseConsolonia()
-            .UseAutoDetectedConsole()
-            .LogToException()
+        let builder =
+            AppBuilder
+                .Configure(fun () -> App(path, configuration))
+                .UseConsolonia()
+
+        let builder =
+            match TerminalGraphics.currentEnvironment () |> TerminalGraphics.decide with
+            | UseTerminalGraphics Sixel ->
+                builder
+                    .UseAutoDetectConsoleColorMode()
+                    .UseAutoDetectedConsole()
+            | _ -> builder.UseAutoDetectedConsole()
+
+        builder.LogToException()
 
     [<EntryPoint>]
     let main argv =
