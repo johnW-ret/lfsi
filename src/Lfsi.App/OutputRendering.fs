@@ -4,6 +4,7 @@ open System
 open System.Collections.Generic
 open System.Diagnostics
 open System.IO
+open System.IO.Compression
 open System.Net.Http
 open System.Net.WebSockets
 open System.Net
@@ -20,6 +21,12 @@ open Avalonia.Threading
 open Avalonia.VisualTree
 open Lfsi.Core
 open Microsoft.Win32
+
+module private SixelDiag =
+    let private logFile = Path.Combine(Path.GetTempPath(), "lfsx-sixel-debug.log")
+    let private writer = lazy (new StreamWriter(logFile, true, Encoding.UTF8, AutoFlush = true))
+    let log msg = try writer.Value.WriteLine(sprintf "[%s] %s" (DateTime.Now.ToString("HH:mm:ss.fff")) msg) with _ -> ()
+
 
 type NotebookTheme =
     { Dark: SolidColorBrush
@@ -447,6 +454,41 @@ type FallbackTerminalImageBackend(protocol: TerminalGraphicsProtocol, ?reason: s
 
     member _.Reason = reason
 
+module private TerminalImagePlacement =
+    let estimatedPixelsPerRow imageHeight reservedRows =
+        Math.Max(1.0, float imageHeight / float (Math.Max(1, reservedRows)))
+
+    let nearestScrollViewer (control: Control) =
+        control.GetVisualAncestors()
+        |> Seq.tryPick (function
+            | :? ScrollViewer as scrollViewer -> Some scrollViewer
+            | _ -> None)
+
+    let visiblePlacement (control: Control) imageHeight reservedRows (topLevel: TopLevel) (point: Point) =
+        match nearestScrollViewer control with
+        | None -> Some(0, imageHeight, int (Math.Round point.Y) + 1)
+        | Some scrollViewer ->
+            match scrollViewer.TranslatePoint(Point(0.0, 0.0), topLevel) with
+            | scrollPoint when scrollPoint.HasValue ->
+                let viewportTop = scrollPoint.Value.Y
+                let viewportBottom = viewportTop + scrollViewer.Bounds.Height
+                let controlBottom = point.Y + control.Bounds.Height
+                let firstVisibleRow = Math.Ceiling(Math.Max(point.Y, viewportTop))
+                let lastVisibleRowExclusive = Math.Floor(Math.Min(controlBottom, viewportBottom))
+                let visibleRows = int (lastVisibleRowExclusive - firstVisibleRow)
+
+                if visibleRows <= 0 then
+                    None
+                else
+                    let hiddenRows = Math.Max(0.0, firstVisibleRow - point.Y)
+                    let estimatedPixelsPerRow = estimatedPixelsPerRow imageHeight reservedRows
+                    let sourceY = int (Math.Round(hiddenRows * estimatedPixelsPerRow))
+                    let sourceHeight = int (Math.Round(float visibleRows * estimatedPixelsPerRow))
+                    let clampedSourceY = Math.Clamp(sourceY, 0, imageHeight - 1)
+                    let clampedSourceHeight = Math.Clamp(sourceHeight, 1, imageHeight - clampedSourceY)
+                    Some(clampedSourceY, clampedSourceHeight, int firstVisibleRow + 1)
+            | _ -> Some(0, imageHeight, int (Math.Round point.Y) + 1)
+
 type private RawTerminalImageControl
     (
         uploadSequence: string,
@@ -459,38 +501,8 @@ type private RawTerminalImageControl
 
     let mutable isEmitPending = false
 
-    let estimatedPixelsPerRow =
-        Math.Max(1.0, float imageHeight / float (Math.Max(1, reservedRows)))
-
-    let nearestScrollViewer () =
-        this.GetVisualAncestors()
-        |> Seq.tryPick (function
-            | :? ScrollViewer as scrollViewer -> Some scrollViewer
-            | _ -> None)
-
     let visiblePlacement (topLevel: TopLevel) (point: Point) =
-        match nearestScrollViewer () with
-        | None -> Some(0, imageHeight, int (Math.Round point.Y) + 1)
-        | Some scrollViewer ->
-            match scrollViewer.TranslatePoint(Point(0.0, 0.0), topLevel) with
-            | scrollPoint when scrollPoint.HasValue ->
-                let viewportTop = scrollPoint.Value.Y
-                let viewportBottom = viewportTop + scrollViewer.Bounds.Height
-                let controlBottom = point.Y + this.Bounds.Height
-                let firstVisibleRow = Math.Ceiling(Math.Max(point.Y, viewportTop))
-                let lastVisibleRowExclusive = Math.Floor(Math.Min(controlBottom, viewportBottom))
-                let visibleRows = int (lastVisibleRowExclusive - firstVisibleRow)
-
-                if visibleRows <= 0 then
-                    None
-                else
-                    let hiddenRows = Math.Max(0.0, firstVisibleRow - point.Y)
-                    let sourceY = int (Math.Round(hiddenRows * estimatedPixelsPerRow))
-                    let sourceHeight = int (Math.Round(float visibleRows * estimatedPixelsPerRow))
-                    let clampedSourceY = Math.Clamp(sourceY, 0, imageHeight - 1)
-                    let clampedSourceHeight = Math.Clamp(sourceHeight, 1, imageHeight - clampedSourceY)
-                    Some(clampedSourceY, clampedSourceHeight, int firstVisibleRow + 1)
-            | _ -> Some(0, imageHeight, int (Math.Round point.Y) + 1)
+        TerminalImagePlacement.visiblePlacement this imageHeight reservedRows topLevel point
 
     let emit () =
         let topLevel = TopLevel.GetTopLevel(this)
@@ -539,6 +551,133 @@ type private RawTerminalImageControl
         | None -> ()
 
         base.OnDetachedFromVisualTree(args)
+
+type private RawSixelImageControl
+    (
+        imageHeight: int,
+        reservedRows: int,
+        rasterWidth: int,
+        generateSixel: int -> int -> string
+    ) as this =
+    inherit Control(MinHeight = float reservedRows, Height = float reservedRows)
+
+    do SixelDiag.log (sprintf "RawSixelImageControl created: imgH=%d resRows=%d rasterW=%d" imageHeight reservedRows rasterWidth)
+
+    let mutable lastEmittedRow = 0
+    let mutable lastEmittedColumn = 0
+    let mutable lastEmittedRows = 0
+    let mutable lastEmittedSourceHeight = 0
+    let mutable isAttached = false
+    let mutable cachedSixelData: string option = None
+    let reEmitTimer = new DispatcherTimer(Interval = TimeSpan.FromMilliseconds(150.0))
+
+    let estimatedPixelsPerRow =
+        TerminalImagePlacement.estimatedPixelsPerRow imageHeight reservedRows
+
+    let visiblePlacement (topLevel: TopLevel) (point: Point) =
+        TerminalImagePlacement.visiblePlacement this imageHeight reservedRows topLevel point
+
+    /// Generate a blank sixel that overwrites old pixel data with empty (no-pixel) bands.
+    let blankSixel width height =
+        let escape = "\u001b"
+        let builder = StringBuilder()
+        builder.Append(escape).Append("Pq") |> ignore
+        builder.Append(sprintf "\"1;1;%d;%d" width height) |> ignore
+        // Define color 0 as black
+        builder.Append("#0;2;0;0;0") |> ignore
+        let bandCount = int (Math.Ceiling(float height / 6.0))
+        for bandIndex in 0 .. bandCount - 1 do
+            builder.Append("#0") |> ignore
+            for _ in 0 .. width - 1 do
+                builder.Append('?') |> ignore
+            if bandIndex < bandCount - 1 then
+                builder.Append('-') |> ignore
+        builder.Append(escape).Append('\\') |> ignore
+        builder.ToString()
+
+    /// Erase old sixel pixels by overwriting with a blank sixel at the last emitted position.
+    let clearOldSixel () =
+        if lastEmittedRows > 0 && lastEmittedSourceHeight > 0 then
+            let blankData = blankSixel rasterWidth lastEmittedSourceHeight
+            Console.Write(sprintf "\u001b7\u001b[%d;%dH%s\u001b8" lastEmittedRow lastEmittedColumn blankData)
+            Console.Out.Flush()
+            lastEmittedRows <- 0
+            lastEmittedSourceHeight <- 0
+            cachedSixelData <- None
+
+    let emit () =
+        if not isAttached then () else
+        let topLevel = TopLevel.GetTopLevel(this)
+        let maybePoint = this.TranslatePoint(Point(0.0, 0.0), topLevel)
+
+        if not (isNull topLevel) && maybePoint.HasValue then
+            let point = maybePoint.Value
+            let column = Math.Max(1, int (Math.Round point.X) + 1)
+
+            match visiblePlacement topLevel point with
+            | Some(sourceY, sourceHeight, row) ->
+                let row = Math.Max(1, row)
+                let visibleRows = int (Math.Ceiling(float sourceHeight / estimatedPixelsPerRow))
+                // If position changed, erase old sixel pixels first
+                if lastEmittedRows > 0 && (lastEmittedRow <> row || lastEmittedColumn <> column) then
+                    clearOldSixel ()
+                let sixelData = generateSixel sourceY sourceHeight
+                Console.Write(sprintf "\u001b7\u001b[%d;%dH%s\u001b8" row column sixelData)
+                Console.Out.Flush()
+                cachedSixelData <- Some sixelData
+                lastEmittedRow <- row
+                lastEmittedColumn <- column
+                lastEmittedRows <- visibleRows + 1
+                lastEmittedSourceHeight <- sourceHeight
+            | None ->
+                clearOldSixel ()
+
+    let reEmit () =
+        if not isAttached then () else
+        let topLevel = TopLevel.GetTopLevel(this)
+        let maybePoint = this.TranslatePoint(Point(0.0, 0.0), topLevel)
+        if isNull topLevel || not maybePoint.HasValue then () else
+        let point = maybePoint.Value
+        let column = Math.Max(1, int (Math.Round point.X) + 1)
+        match visiblePlacement topLevel point with
+        | Some(_sourceY, _sourceHeight, row) ->
+            let row = Math.Max(1, row)
+            if row = lastEmittedRow && column = lastEmittedColumn then
+                match cachedSixelData with
+                | Some sixelData ->
+                    Console.Write(sprintf "\u001b7\u001b[%d;%dH%s\u001b8" row column sixelData)
+                    Console.Out.Flush()
+                | None -> emit ()
+            else
+                emit ()
+        | None ->
+            clearOldSixel ()
+
+    do
+        reEmitTimer.Tick.Add(fun _ -> reEmit ())
+
+    override _.OnAttachedToVisualTree(args) =
+        base.OnAttachedToVisualTree(args)
+        isAttached <- true
+        Dispatcher.UIThread.Post(
+            (fun () -> emit ()),
+            DispatcherPriority.Background
+        )
+        reEmitTimer.Start()
+
+    override _.Render(context) =
+        base.Render(context)
+        Dispatcher.UIThread.Post(
+            (fun () -> emit ()),
+            DispatcherPriority.Background
+        )
+
+    override _.OnDetachedFromVisualTree(args) =
+        isAttached <- false
+        reEmitTimer.Stop()
+        clearOldSixel ()
+        base.OnDetachedFromVisualTree(args)
+
 
 type KittyImageBackend(?maxChunkLength: int, ?reservedRows: int) =
     let maxChunkLength = defaultArg maxChunkLength 4096
@@ -705,6 +844,496 @@ type KittyImageBackend(?maxChunkLength: int, ?reservedRows: int) =
 
     interface ITerminalImageLayer with
         member _.Clear() = clearAll ()
+
+type private SixelRaster =
+    { Width: int
+      Height: int
+      Pixels: byte[] }
+
+type SixelImageBackend(?reservedRows: int) =
+    let fallbackReservedRows = defaultArg reservedRows 18
+    let estimatedCellPixelHeight = 16.0
+    let maxRasterWidth = 800
+    let maxRasterHeight = 320
+    let escape = "\u001b"
+    let rasterCache = Dictionary<string, SixelRaster>()
+
+    let colorLevel (value: byte) =
+        Math.Clamp((int value * 5 + 127) / 255, 0, 5)
+
+    let colorKey (r: byte) (g: byte) (b: byte) =
+        16 + colorLevel r * 36 + colorLevel g * 6 + colorLevel b
+
+    let colorPercent level = level * 20
+
+    let colorDefinition register index =
+        let local = index - 16
+        let r = local / 36
+        let g = (local / 6) % 6
+        let b = local % 6
+        sprintf "#%d;2;%d;%d;%d" register (colorPercent r) (colorPercent g) (colorPercent b)
+
+    let pixelColorIndex (raster: SixelRaster) x y =
+        let offset = (y * raster.Width + x) * 4
+        let b = raster.Pixels[offset]
+        let g = raster.Pixels[offset + 1]
+        let r = raster.Pixels[offset + 2]
+        let a = raster.Pixels[offset + 3]
+
+        if a = 255uy then
+            colorKey r g b
+        else
+            let alpha = int a
+            let composite channel =
+                byte (((int channel * alpha) + (24 * (255 - alpha))) / 255)
+
+            colorKey (composite r) (composite g) (composite b)
+
+    let appendRepeated (builder: StringBuilder) (count: int) (value: char) =
+        if count >= 4 then
+            builder.Append('!').Append(count).Append(value) |> ignore
+        else
+            for _ in 1..count do
+                builder.Append(value) |> ignore
+
+    let appendColorBand (builder: StringBuilder) (raster: SixelRaster) sourceY bandY sourceHeight colorKey =
+        let mutable runChar = char 0
+        let mutable runLength = 0
+
+        for x in 0 .. raster.Width - 1 do
+            let mutable bits = 0
+
+            for bit in 0..5 do
+                let cropY = bandY + bit
+
+                if cropY < sourceHeight then
+                    let y = sourceY + cropY
+
+                    if y < raster.Height && pixelColorIndex raster x y = colorKey then
+                        bits <- bits ||| (1 <<< bit)
+
+            let ch = char (63 + bits)
+
+            if runLength = 0 then
+                runChar <- ch
+                runLength <- 1
+            elif ch = runChar then
+                runLength <- runLength + 1
+            else
+                appendRepeated builder runLength runChar
+                runChar <- ch
+                runLength <- 1
+
+        if runLength > 0 then
+            appendRepeated builder runLength runChar
+
+    let bandColors (raster: SixelRaster) sourceY bandY sourceHeight =
+        let colors = SortedSet<int>()
+
+        for yOffset in bandY .. Math.Min(sourceHeight - 1, bandY + 5) do
+            let y = sourceY + yOffset
+
+            if y < raster.Height then
+                for x in 0 .. raster.Width - 1 do
+                    colors.Add(pixelColorIndex raster x y) |> ignore
+
+        colors |> Seq.toList
+
+    let sixelSequence raster sourceY sourceHeight =
+        let sourceY = Math.Clamp(sourceY, 0, Math.Max(0, raster.Height - 1))
+        let sourceHeight = Math.Clamp(sourceHeight, 1, raster.Height - sourceY)
+        let builder = StringBuilder()
+        let allColors = SortedSet<int>()
+
+        for y in sourceY .. sourceY + sourceHeight - 1 do
+            for x in 0 .. raster.Width - 1 do
+                allColors.Add(pixelColorIndex raster x y) |> ignore
+
+        let palette =
+            allColors
+            |> Seq.mapi (fun register colorKey -> colorKey, register)
+            |> dict
+
+        builder.Append(escape).Append("Pq") |> ignore
+        builder.Append(sprintf "\"1;1;%d;%d" raster.Width sourceHeight) |> ignore
+
+        for KeyValue(colorKey, register) in palette do
+            builder.Append(colorDefinition register colorKey) |> ignore
+
+        let bandCount = int (Math.Ceiling(float sourceHeight / 6.0))
+
+        for bandIndex in 0 .. bandCount - 1 do
+            let bandY = bandIndex * 6
+            let colors = bandColors raster sourceY bandY sourceHeight
+
+            colors
+            |> List.iteri (fun index colorKey ->
+                builder.Append('#').Append(palette[colorKey]) |> ignore
+                appendColorBand builder raster sourceY bandY sourceHeight colorKey
+
+                if index < colors.Length - 1 then
+                    builder.Append('$') |> ignore)
+
+            if bandIndex < bandCount - 1 then
+                builder.Append('-') |> ignore
+
+        builder.Append(escape).Append('\\') |> ignore
+        builder.ToString()
+
+    let autocropRaster (raster: SixelRaster) =
+        // Detect the dominant background color (bottom-right pixel)
+        let bgOff = ((raster.Height - 1) * raster.Width + (raster.Width - 1)) * 4
+        let bgB, bgG, bgR = raster.Pixels.[bgOff], raster.Pixels.[bgOff+1], raster.Pixels.[bgOff+2]
+        let threshold = 30  // color distance threshold for "same as background"
+        let isBg x y =
+            let off = (y * raster.Width + x) * 4
+            abs (int raster.Pixels.[off] - int bgB) + abs (int raster.Pixels.[off+1] - int bgG) + abs (int raster.Pixels.[off+2] - int bgR) < threshold
+        // Find content bounds by scanning edges
+        let mutable minX = raster.Width
+        let mutable minY = raster.Height
+        let mutable maxX = 0
+        let mutable maxY = 0
+        // Sample every 4th pixel for speed on large images
+        let step = Math.Max(1, Math.Min(raster.Width, raster.Height) / 500)
+        for y in 0 .. step .. raster.Height - 1 do
+            for x in 0 .. step .. raster.Width - 1 do
+                if not (isBg x y) then
+                    minX <- Math.Min(minX, x)
+                    minY <- Math.Min(minY, y)
+                    maxX <- Math.Max(maxX, x)
+                    maxY <- Math.Max(maxY, y)
+        if maxX <= minX || maxY <= minY then
+            raster  // no content found, return original
+        else
+            // Add margin
+            let margin = Math.Max(step, 4)
+            let cropX = Math.Max(0, minX - margin)
+            let cropY = Math.Max(0, minY - margin)
+            let cropW = Math.Min(raster.Width - cropX, maxX - cropX + margin + 1)
+            let cropH = Math.Min(raster.Height - cropY, maxY - cropY + margin + 1)
+            SixelDiag.log (sprintf "autocrop: %dx%d -> %dx%d (crop from %d,%d)" raster.Width raster.Height cropW cropH cropX cropY)
+            if cropW >= raster.Width * 3 / 4 && cropH >= raster.Height * 3 / 4 then
+                raster  // content fills most of image, no crop needed
+            else
+                let pixels = Array.zeroCreate<byte>(cropW * cropH * 4)
+                for y in 0 .. cropH - 1 do
+                    let srcOff = ((cropY + y) * raster.Width + cropX) * 4
+                    let dstOff = y * cropW * 4
+                    Array.Copy(raster.Pixels, srcOff, pixels, dstOff, cropW * 4)
+                { Width = cropW; Height = cropH; Pixels = pixels }
+
+    let scaleRaster (raster: SixelRaster) =
+        let scale =
+            Math.Min(
+                1.0,
+                Math.Min(float maxRasterWidth / float raster.Width, float maxRasterHeight / float raster.Height)
+            )
+
+        if scale >= 1.0 then
+            raster
+        else
+            let width = Math.Max(1, int (Math.Round(float raster.Width * scale)))
+            let height = Math.Max(1, int (Math.Round(float raster.Height * scale)))
+            let pixels = Array.zeroCreate<byte> (width * height * 4)
+            let invScale = 1.0 / scale
+
+            for y in 0 .. height - 1 do
+                let srcY0 = int (Math.Floor(float y * invScale))
+                let srcY1 = Math.Min(raster.Height - 1, int (Math.Floor(float (y + 1) * invScale)) - 1)
+                let srcY1 = Math.Max(srcY0, srcY1)
+
+                for x in 0 .. width - 1 do
+                    let srcX0 = int (Math.Floor(float x * invScale))
+                    let srcX1 = Math.Min(raster.Width - 1, int (Math.Floor(float (x + 1) * invScale)) - 1)
+                    let srcX1 = Math.Max(srcX0, srcX1)
+                    let mutable sumB = 0
+                    let mutable sumG = 0
+                    let mutable sumR = 0
+                    let mutable sumA = 0
+                    let mutable count = 0
+
+                    for sy in srcY0 .. srcY1 do
+                        for sx in srcX0 .. srcX1 do
+                            let off = (sy * raster.Width + sx) * 4
+                            sumB <- sumB + int raster.Pixels[off]
+                            sumG <- sumG + int raster.Pixels[off + 1]
+                            sumR <- sumR + int raster.Pixels[off + 2]
+                            sumA <- sumA + int raster.Pixels[off + 3]
+                            count <- count + 1
+
+                    let targetOffset = (y * width + x) * 4
+
+                    if count > 0 then
+                        pixels[targetOffset] <- byte (sumB / count)
+                        pixels[targetOffset + 1] <- byte (sumG / count)
+                        pixels[targetOffset + 2] <- byte (sumR / count)
+                        pixels[targetOffset + 3] <- byte (sumA / count)
+
+            { Width = width
+              Height = height
+              Pixels = pixels }
+
+    let int32BigEndian (bytes: byte[]) offset =
+        (int bytes[offset] <<< 24)
+        ||| (int bytes[offset + 1] <<< 16)
+        ||| (int bytes[offset + 2] <<< 8)
+        ||| int bytes[offset + 3]
+
+    let paeth left up upperLeft =
+        let p = left + up - upperLeft
+        let pa = abs (p - left)
+        let pb = abs (p - up)
+        let pc = abs (p - upperLeft)
+
+        if pa <= pb && pa <= pc then left
+        elif pb <= pc then up
+        else upperLeft
+
+    let decodePng (bytes: byte[]) =
+        try
+            if
+                bytes.Length < 8
+                || bytes[0] <> 0x89uy
+                || bytes[1] <> 0x50uy
+                || bytes[2] <> 0x4Euy
+                || bytes[3] <> 0x47uy
+            then
+                None
+            else
+                let mutable offset = 8
+                let mutable width = 0
+                let mutable height = 0
+                let mutable bitDepth = 0
+                let mutable colorType = 0
+                use idat = new MemoryStream()
+
+                while offset + 8 <= bytes.Length do
+                    let length = int32BigEndian bytes offset
+                    let chunkType = Encoding.ASCII.GetString(bytes, offset + 4, 4)
+                    let chunkOffset = offset + 8
+
+                    if chunkOffset + length + 4 > bytes.Length then
+                        offset <- bytes.Length
+                    else
+                        match chunkType with
+                        | "IHDR" ->
+                            width <- int32BigEndian bytes chunkOffset
+                            height <- int32BigEndian bytes (chunkOffset + 4)
+                            bitDepth <- int bytes[chunkOffset + 8]
+                            colorType <- int bytes[chunkOffset + 9]
+                        | "IDAT" -> idat.Write(bytes, chunkOffset, length)
+                        | "IEND" -> offset <- bytes.Length
+                        | _ -> ()
+
+                        if offset < bytes.Length then
+                            offset <- chunkOffset + length + 4
+
+                SixelDiag.log (sprintf "decodePng: IHDR w=%d h=%d bitDepth=%d colorType=%d idatLen=%d" width height bitDepth colorType (int idat.Length))
+                if width <= 0 || height <= 0 || bitDepth <> 8 || (colorType <> 2 && colorType <> 6) then
+                    SixelDiag.log (sprintf "decodePng: REJECTED format (bitDepth=%d colorType=%d)" bitDepth colorType)
+                    None
+                else
+                    let channels = if colorType = 6 then 4 else 3
+                    let sourceStride = width * channels
+                    let compressed = idat.ToArray()
+                    use compressedStream = new MemoryStream(compressed)
+                    use zlib = new ZLibStream(compressedStream, CompressionMode.Decompress)
+                    use decompressed = new MemoryStream()
+                    zlib.CopyTo(decompressed)
+
+                    let filtered = decompressed.ToArray()
+                    let expectedFilteredLen = (sourceStride + 1) * height
+                    SixelDiag.log (sprintf "decodePng: channels=%d sourceStride=%d filteredLen=%d expectedLen=%d" channels sourceStride filtered.Length expectedFilteredLen)
+                    // Sample the raw filtered data for the first few filter bytes
+                    SixelDiag.log (sprintf "decodePng: first 10 filter bytes: %s" (String.Join(",", [| for i in 0..Math.Min(9, height-1) -> string (int filtered[i * (sourceStride + 1)]) |])))
+                    let sourcePixels = Array.zeroCreate<byte> (sourceStride * height)
+                    let mutable sourceOffset = 0
+
+                    for y in 0 .. height - 1 do
+                        let filter = int filtered[sourceOffset]
+                        sourceOffset <- sourceOffset + 1
+                        let rowOffset = y * sourceStride
+                        let previousRowOffset = rowOffset - sourceStride
+
+                        for x in 0 .. sourceStride - 1 do
+                            let raw = int filtered[sourceOffset + x]
+                            let left = if x >= channels then int sourcePixels[rowOffset + x - channels] else 0
+                            let up = if y > 0 then int sourcePixels[previousRowOffset + x] else 0
+
+                            let upperLeft =
+                                if y > 0 && x >= channels then
+                                    int sourcePixels[previousRowOffset + x - channels]
+                                else
+                                    0
+
+                            let value =
+                                match filter with
+                                | 0 -> raw
+                                | 1 -> raw + left
+                                | 2 -> raw + up
+                                | 3 -> raw + ((left + up) / 2)
+                                | 4 -> raw + paeth left up upperLeft
+                                | _ -> failwithf "Unsupported PNG filter: %d" filter
+
+                            sourcePixels[rowOffset + x] <- byte (value &&& 0xFF)
+
+                        sourceOffset <- sourceOffset + sourceStride
+
+                    let pixels = Array.zeroCreate<byte> (width * height * 4)
+
+                    for y in 0 .. height - 1 do
+                        for x in 0 .. width - 1 do
+                            let sourcePixelOffset = y * sourceStride + x * channels
+                            let targetPixelOffset = (y * width + x) * 4
+                            pixels[targetPixelOffset] <- sourcePixels[sourcePixelOffset + 2]
+                            pixels[targetPixelOffset + 1] <- sourcePixels[sourcePixelOffset + 1]
+                            pixels[targetPixelOffset + 2] <- sourcePixels[sourcePixelOffset]
+                            pixels[targetPixelOffset + 3] <-
+                                if channels = 4 then sourcePixels[sourcePixelOffset + 3] else 255uy
+
+                    { Width = width
+                      Height = height
+                      Pixels = pixels }
+                    |> autocropRaster
+                    |> fun originalRaster ->
+                        // Sample original before scaling
+                        let sp x y =
+                            if x < originalRaster.Width && y < originalRaster.Height then
+                                let o = (y * originalRaster.Width + x) * 4
+                                sprintf "(%d,%d,%d)" originalRaster.Pixels.[o+2] originalRaster.Pixels.[o+1] originalRaster.Pixels.[o]
+                            else "OOB"
+                        SixelDiag.log (sprintf "decodePng: ORIGINAL samples RGB: [0,0]=%s [100,100]=%s [500,500]=%s [1000,1000]=%s [4500,4500]=%s [8999,8999]=%s" (sp 0 0) (sp 100 100) (sp 500 500) (sp 1000 1000) (sp 4500 4500) (sp 8999 8999))
+                        scaleRaster originalRaster
+                    |> Some
+        with _ ->
+            None
+
+    let rasterKey (bytes: byte[]) =
+        string bytes.Length
+        + ":"
+        + Convert.ToBase64String(bytes.AsSpan(0, Math.Min(bytes.Length, 64)))
+
+    let decodeWithAvalonia (bytes: byte[]) =
+        try
+            use stream = new MemoryStream(bytes)
+            let bitmap = new Bitmap(stream)
+            let srcW = bitmap.PixelSize.Width
+            let srcH = bitmap.PixelSize.Height
+            SixelDiag.log (sprintf "decodeWithAvalonia: src=%dx%d" srcW srcH)
+            let scale = Math.Min(1.0, Math.Min(float maxRasterWidth / float srcW, float maxRasterHeight / float srcH))
+            let targetW = Math.Max(1, int (Math.Round(float srcW * scale)))
+            let targetH = Math.Max(1, int (Math.Round(float srcH * scale)))
+            SixelDiag.log (sprintf "decodeWithAvalonia: scale=%g target=%dx%d" scale targetW targetH)
+            let rtb = new RenderTargetBitmap(Avalonia.PixelSize(targetW, targetH), Vector(96.0, 96.0))
+            use ctx = rtb.CreateDrawingContext()
+            ctx.DrawImage(bitmap, Rect(0.0, 0.0, float srcW, float srcH), Rect(0.0, 0.0, float targetW, float targetH))
+            ctx.Dispose()
+            // Save to PNG then decode with our simple decoder to get pixels
+            // This is simpler than trying to lock the RenderTargetBitmap pixels
+            use pngStream = new MemoryStream()
+            rtb.Save(pngStream)
+            let pngBytes = pngStream.ToArray()
+            SixelDiag.log (sprintf "decodeWithAvalonia: re-encoded PNG size=%d" pngBytes.Length)
+            // Decode the smaller PNG with our custom decoder (it will be at targetW x targetH)
+            match decodePng pngBytes with
+            | Some raster ->
+                SixelDiag.log (sprintf "decodeWithAvalonia: re-decoded to %dx%d" raster.Width raster.Height)
+                let pixelData = raster.Pixels
+                ignore pixelData  // raster is already the right format
+                Some raster
+            | None ->
+                SixelDiag.log "decodeWithAvalonia: re-decode failed"
+                None
+        with ex ->
+            SixelDiag.log (sprintf "decodeWithAvalonia failed: %s" ex.Message)
+            None
+
+    let rasterFor (bytes: byte[]) =
+        let key = rasterKey bytes
+
+        match rasterCache.TryGetValue key with
+        | true, raster -> Some raster
+        | false, _ ->
+            match decodeWithAvalonia bytes with
+            | Some raster ->
+                rasterCache[key] <- raster
+                Some raster
+            | None ->
+                match decodePng bytes with
+                | Some raster ->
+                    rasterCache[key] <- raster
+                    Some raster
+                | None -> None
+
+    let reservedRowsFor height =
+        Math.Max(fallbackReservedRows, int (Math.Ceiling(float height / estimatedCellPixelHeight)))
+
+    let rawSixelControl (raster: SixelRaster) =
+        RawSixelImageControl(
+            raster.Height,
+            reservedRowsFor raster.Height,
+            raster.Width,
+            (fun sourceY sourceHeight -> sixelSequence raster sourceY sourceHeight)
+        )
+        :> Control
+
+
+    /// Exposed for smoke tests and focused backend tests; normal rendering goes through RenderImage.
+    member _.DiagnosticSixelSequence(width: int, height: int, pixels: byte[], ?sourceY: int, ?sourceHeight: int) =
+        let raster =
+            { Width = width
+              Height = height
+              Pixels = pixels }
+
+        sixelSequence raster (defaultArg sourceY 0) (defaultArg sourceHeight height)
+
+    /// Exposed for tests that need to verify PNG decoding and sixel encoding together.
+    member _.DiagnosticSixelSequenceFromPng(bytes: byte[]) =
+        decodePng bytes |> Option.map (fun raster -> sixelSequence raster 0 raster.Height)
+
+    /// Exposed for tests that verify layout reservation without rendering a control tree.
+    member _.DiagnosticReservedRows(height: int) = reservedRowsFor height
+
+    interface ITerminalImageBackend with
+        member _.Protocol = Sixel
+
+        member _.RenderImage(frame) =
+            SixelDiag.log (sprintf "RenderImage: mime=%s len=%d" frame.MimeType frame.Bytes.Length)
+            if frame.MimeType <> MimeTypes.Png then
+                SixelDiag.log "RenderImage: not PNG"
+                None
+            else
+                match rasterFor frame.Bytes with
+                | None ->
+                    SixelDiag.log "RenderImage: decode failed"
+                    None
+                | Some raster ->
+                    SixelDiag.log (sprintf "RenderImage: raster %dx%d pixelBytes=%d" raster.Width raster.Height raster.Pixels.Length)
+                    // Sample some pixels for debugging
+                    let samplePixel x y =
+                        if x < raster.Width && y < raster.Height then
+                            let off = (y * raster.Width + x) * 4
+                            sprintf "(%d,%d,%d,%d)" raster.Pixels.[off] raster.Pixels.[off+1] raster.Pixels.[off+2] raster.Pixels.[off+3]
+                        else "OOB"
+                    SixelDiag.log (sprintf "RenderImage: pixels (BGRA): [0,0]=%s [w/2,h/2]=%s [0,h-1]=%s" (samplePixel 0 0) (samplePixel (raster.Width/2) (raster.Height/2)) (samplePixel 0 (raster.Height-1)))
+                    // Count unique colors in 216-color cube
+                    let colorSet = System.Collections.Generic.HashSet<int>()
+                    for y in 0 .. raster.Height - 1 do
+                        for x in 0 .. raster.Width - 1 do
+                            let off = (y * raster.Width + x) * 4
+                            let b = raster.Pixels.[off]
+                            let g = raster.Pixels.[off+1]
+                            let r = raster.Pixels.[off+2]
+                            let a = raster.Pixels.[off+3]
+                            let rl = Math.Clamp((int r * 5 + 127) / 255, 0, 5)
+                            let gl = Math.Clamp((int g * 5 + 127) / 255, 0, 5)
+                            let bl = Math.Clamp((int b * 5 + 127) / 255, 0, 5)
+                            colorSet.Add(16 + rl*36 + gl*6 + bl) |> ignore
+                    SixelDiag.log (sprintf "RenderImage: unique quantized colors=%d" colorSet.Count)
+                    rawSixelControl raster |> Some
+
+    interface ITerminalImageLayer with
+        member _.Clear() = rasterCache.Clear()
 
 type AvaloniaImageBackend(protocol: TerminalGraphicsProtocol) =
     interface ITerminalImageBackend with
