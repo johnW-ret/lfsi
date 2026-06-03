@@ -17,11 +17,13 @@ type TerminalClient =
     | Ghostty
     | WezTerm
     | ITerm2
+    | WindowsTerminal
     | UnknownTerminal
 
 type TerminalEnvironment =
     { Term: string option
       TermProgram: string option
+      WtSession: string option
       GhosttyResourcesDir: string option
       LfsiTerminalGraphics: string option
       LfsiEnableKittyGraphics: string option }
@@ -39,6 +41,7 @@ module TerminalGraphics =
     let currentEnvironment () =
         { Term = env "TERM"
           TermProgram = env "TERM_PROGRAM"
+          WtSession = env "WT_SESSION"
           GhosttyResourcesDir = env "GHOSTTY_RESOURCES_DIR"
           LfsiTerminalGraphics = env "LFSI_TERMINAL_GRAPHICS"
           LfsiEnableKittyGraphics = env "LFSI_ENABLE_KITTY_GRAPHICS" }
@@ -63,6 +66,8 @@ module TerminalGraphics =
             WezTerm
         elif contains "iTerm.app" environment.TermProgram then
             ITerm2
+        elif environment.WtSession.IsSome then
+            WindowsTerminal
         else
             UnknownTerminal
 
@@ -98,4 +103,5 @@ module TerminalGraphics =
             | WezTerm ->
                 UseTextFallback "WezTerm terminal graphics require explicit opt-in with LFSI_TERMINAL_GRAPHICS=kitty."
             | ITerm2 -> UseTextFallback "iTerm2 graphics require the OSC1337 backend."
+            | WindowsTerminal -> UseTerminalGraphics Sixel
             | UnknownTerminal -> UseTextFallback "No supported terminal graphics protocol was detected."
