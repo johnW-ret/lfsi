@@ -898,16 +898,11 @@ module Program =
         let configuration = LfsiConfiguration.load ()
 
         let builder =
-            AppBuilder
-                .Configure(fun () -> App(path, configuration))
-                .UseConsolonia()
+            AppBuilder.Configure(fun () -> App(path, configuration)).UseConsolonia()
 
         let builder =
             match TerminalGraphics.currentEnvironment () |> TerminalGraphics.decide with
-            | UseTerminalGraphics Sixel ->
-                builder
-                    .UseAutoDetectConsoleColorMode()
-                    .UseAutoDetectedConsole()
+            | UseTerminalGraphics Sixel -> builder.UseAutoDetectConsoleColorMode().UseAutoDetectedConsole()
             | _ -> builder.UseAutoDetectedConsole()
 
         builder.LogToException()

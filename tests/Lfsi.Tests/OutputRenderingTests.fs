@@ -78,13 +78,18 @@ module OutputRenderingTests =
                 let raw = int filtered[sourceOffset + x]
 
                 let left =
-                    if x >= channels then int pixels[rowOffset + x - channels] else 0
+                    if x >= channels then
+                        int pixels[rowOffset + x - channels]
+                    else
+                        0
 
-                let up =
-                    if y > 0 then int pixels[previousRowOffset + x] else 0
+                let up = if y > 0 then int pixels[previousRowOffset + x] else 0
 
                 let upperLeft =
-                    if y > 0 && x >= channels then int pixels[previousRowOffset + x - channels] else 0
+                    if y > 0 && x >= channels then
+                        int pixels[previousRowOffset + x - channels]
+                    else
+                        0
 
                 let value =
                     match filter with
@@ -199,7 +204,11 @@ module OutputRenderingTests =
               <| fun _ ->
                   let backend = SixelImageBackend() :> ITerminalImageBackend
 
-                  match backend.RenderImage { MimeType = MimeTypes.Png; Bytes = tinyRgbPng () } with
+                  match
+                      backend.RenderImage
+                          { MimeType = MimeTypes.Png
+                            Bytes = tinyRgbPng () }
+                  with
                   | Some control ->
                       Expect.isGreaterThanOrEqual control.Height 1.0 "image control reserves terminal rows"
                       Expect.isFalse (control :? TextBlock) "image rendering is emitted as raw terminal graphics"
@@ -226,6 +235,7 @@ module OutputRenderingTests =
                           let width, height, channels, pixels = pngPixels frame.Bytes
                           Expect.isGreaterThanOrEqual width 640 "screenshot width"
                           Expect.isGreaterThanOrEqual height 360 "screenshot height"
+
                           Expect.isTrue
                               (hasNonBackgroundPixel channels pixels)
                               "screenshot has visible non-background pixels"
