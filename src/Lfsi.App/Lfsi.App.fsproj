@@ -20,6 +20,7 @@
 
   <ItemGroup>
     <PackageReference Include="Consolonia" Version="11.3.9" />
+    <PackageReference Update="FSharp.Core" Version="10.1.201" />
     <PackageReference Include="FSharp.Compiler.Service" Version="43.12.201" />
     <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="10.0.0" />
   </ItemGroup>
