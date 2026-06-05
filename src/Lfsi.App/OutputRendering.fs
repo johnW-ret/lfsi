@@ -306,7 +306,10 @@ type ChromeCdpVisualOutputService(?chromePath: string, ?viewportWidth: int, ?vie
                     nextCommandId <- nextCommandId + 1
                     do! Task.Delay(250, cancellationToken)
 
-            return nextCommandId
+            if isReady then
+                return Ok nextCommandId
+            else
+                return Result.Error "Timed out waiting for a visual HTML element to render."
         }
 
     let renderHtmlAsync html =
@@ -380,35 +383,41 @@ type ChromeCdpVisualOutputService(?chromePath: string, ?viewportWidth: int, ?vie
                                 let navigateParams = sprintf """{"url":%s}""" (JsonSerializer.Serialize(fileUrl))
                                 let! _ = sendCommand socket 4 "Page.navigate" navigateParams cancellationToken
 
-                                let! nextCommandId = waitForVisualRender socket 5 cancellationToken
-                                let! screenshotParams = contentClipParams socket (nextCommandId + 1) cancellationToken
+                                let! visualRender = waitForVisualRender socket 5 cancellationToken
 
-                                let! screenshotResponse =
-                                    sendCommand
-                                        socket
-                                        (nextCommandId + 2)
-                                        "Page.captureScreenshot"
-                                        screenshotParams
-                                        cancellationToken
+                                match visualRender with
+                                | Result.Error reason ->
+                                    return HtmlUnsupported("Chrome/CDP rendering failed: " + reason)
+                                | Ok nextCommandId ->
+                                    let! screenshotParams =
+                                        contentClipParams socket (nextCommandId + 1) cancellationToken
 
-                                use document = JsonDocument.Parse(screenshotResponse)
-                                let root = document.RootElement
-                                let mutable errorProperty = Unchecked.defaultof<JsonElement>
+                                    let! screenshotResponse =
+                                        sendCommand
+                                            socket
+                                            (nextCommandId + 2)
+                                            "Page.captureScreenshot"
+                                            screenshotParams
+                                            cancellationToken
 
-                                if root.TryGetProperty("error", &errorProperty) then
-                                    return
-                                        HtmlUnsupported(
-                                            "Chrome/CDP rendering failed: "
-                                            + errorProperty.GetProperty("message").GetString()
-                                        )
-                                else
-                                    let data = root.GetProperty("result").GetProperty("data").GetString()
-                                    let bytes = Convert.FromBase64String(data)
+                                    use document = JsonDocument.Parse(screenshotResponse)
+                                    let root = document.RootElement
+                                    let mutable errorProperty = Unchecked.defaultof<JsonElement>
 
-                                    return
-                                        HtmlFrame
-                                            { MimeType = MimeTypes.Png
-                                              Bytes = bytes }
+                                    if root.TryGetProperty("error", &errorProperty) then
+                                        return
+                                            HtmlUnsupported(
+                                                "Chrome/CDP rendering failed: "
+                                                + errorProperty.GetProperty("message").GetString()
+                                            )
+                                    else
+                                        let data = root.GetProperty("result").GetProperty("data").GetString()
+                                        let bytes = Convert.FromBase64String(data)
+
+                                        return
+                                            HtmlFrame
+                                                { MimeType = MimeTypes.Png
+                                                  Bytes = bytes }
                             finally
                                 try
                                     if not (isNull proc) && not proc.HasExited then
