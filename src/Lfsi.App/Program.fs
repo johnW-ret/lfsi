@@ -64,7 +64,31 @@ type QuitConfirmation =
     | Arming
     | Armed
 
-type HeaderAction = { Key: string; Label: string }
+type HeaderKey =
+    | UpDown
+    | Enter
+    | A
+    | B
+    | XCV
+    | MY
+    | Esc
+    | F5
+    | CtrlS
+    | CtrlC
+
+type HeaderLabel =
+    | Move
+    | Edit
+    | Above
+    | Below
+    | CutCopyPaste
+    | MarkdownCode
+    | Select
+    | Run
+    | Save
+    | Quit
+
+type HeaderAction = { Key: HeaderKey; Label: HeaderLabel }
 
 type HeaderModel =
     { AppName: string
@@ -98,7 +122,34 @@ type NotebookUiState =
       QuitConfirmation: QuitConfirmation }
 
 module NotebookHeader =
-    let private renderAction action = action.Key + " " + action.Label
+    let private renderKey key =
+        match key with
+        | UpDown -> "↑↓"
+        | Enter -> "Enter"
+        | A -> "A"
+        | B -> "B"
+        | XCV -> "X/C/V"
+        | MY -> "M/Y"
+        | Esc -> "Esc"
+        | F5 -> "F5"
+        | CtrlS -> "Ctrl+S"
+        | CtrlC -> "Ctrl+C"
+
+    let private renderLabel label =
+        match label with
+        | Move -> "move"
+        | Edit -> "edit"
+        | Above -> "above"
+        | Below -> "below"
+        | CutCopyPaste -> "cut/copy/paste"
+        | MarkdownCode -> "markdown/code"
+        | Select -> "select"
+        | Run -> "run"
+        | Save -> "save"
+        | Quit -> "quit"
+
+    let private renderAction action =
+        renderKey action.Key + " " + renderLabel action.Label
 
     let render model =
         let position =
@@ -610,26 +661,23 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
         let updateHeader () =
             let actions =
                 [ if not (isEditing ()) then
-                      { Key = "↑↓"; Label = "move" }
-                      { Key = "Enter"; Label = "edit" }
-                      { Key = "A"; Label = "above" }
-                      { Key = "B"; Label = "below" }
-
-                      { Key = "X/C/V"
-                        Label = "cut/copy/paste" }
-
-                      { Key = "M/Y"; Label = "markdown/code" }
+                      { Key = UpDown; Label = Move }
+                      { Key = Enter; Label = Edit }
+                      { Key = A; Label = Above }
+                      { Key = B; Label = Below }
+                      { Key = XCV; Label = CutCopyPaste }
+                      { Key = MY; Label = MarkdownCode }
 
                   if isEditing () then
-                      { Key = "Esc"; Label = "select" }
+                      { Key = Esc; Label = Select }
 
                   if selectedRunnableCell () |> Option.isSome then
-                      { Key = "F5"; Label = "run" }
+                      { Key = F5; Label = Run }
 
                   if isDirty () && FilePersistence.canSave persistenceMode then
-                      { Key = "Ctrl+S"; Label = "save" }
+                      { Key = CtrlS; Label = Save }
 
-                  { Key = "Ctrl+C"; Label = "quit" } ]
+                  { Key = CtrlC; Label = Quit } ]
 
             let cellPosition =
                 match selection with
