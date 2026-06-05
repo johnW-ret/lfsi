@@ -213,13 +213,7 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
             { uiState with
                 QuitConfirmation = quitConfirmation }
 
-    let formattingStatus () =
-        if parsed.FormattingDiagnostics.IsEmpty then
-            "FSharp.Formatting parse: ok"
-        else
-            "FSharp.Formatting parse: " + String.concat "; " parsed.FormattingDiagnostics
-
-    let restoreStatus (status: TextBlock) = status.Text <- formattingStatus ()
+    let restoreStatus (status: TextBlock) = status.Text <- "Ready"
 
     let cellKindLabel kind =
         match kind with
@@ -521,7 +515,7 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
 
         let status =
             TextBlock(
-                Text = formattingStatus (),
+                Text = "Ready",
                 Foreground = theme.Muted,
                 Background = theme.Dark,
                 TextWrapping = TextWrapping.Wrap
