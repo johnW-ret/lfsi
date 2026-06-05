@@ -17,6 +17,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Update="FSharp.Core" Version="10.1.201" />
     <PackageReference Include="FSharp.Formatting" Version="22.0.0" />
   </ItemGroup>
 
