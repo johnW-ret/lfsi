@@ -77,6 +77,22 @@ type WordJumpDirection =
     | PreviousWord
     | NextWord
 
+type NotebookMode =
+    | Selecting
+    | Editing of TextBox option
+    | Running
+
+type DocumentChangeState =
+    | Clean
+    | Dirty
+    | ExternalChanged
+    | DirtyWithExternalChanged
+
+type NotebookUiState =
+    { Mode: NotebookMode
+      DocumentChange: DocumentChangeState
+      QuitConfirmation: QuitConfirmation }
+
 module NotebookHeader =
     let private renderAction action = action.Key + " " + action.Label
 
@@ -122,15 +138,80 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
     let quitConfirmationMessage = "Press Ctrl+C again to quit, or Esc to cancel."
     let mutable parsed = initialParsed
     let mutable lastWriteTimeUtc = initialWriteTimeUtc
-    let mutable quitConfirmation = Hidden
     let mutable selectedIndex = 0
     let mutable cells = parsed.Document.Cells
-    let mutable isDirty = false
-    let mutable isEditing = false
-    let mutable isRunning = false
-    let mutable hasExternalChanges = false
-    let mutable selectedEditor: TextBox option = None
+
+    let mutable uiState =
+        { Mode = Selecting
+          DocumentChange = Clean
+          QuitConfirmation = Hidden }
+
     let mutable cellClipboard: NotebookCell option = None
+
+    let isEditing () =
+        match uiState.Mode with
+        | Editing _ -> true
+        | Selecting
+        | Running -> false
+
+    let isRunning () =
+        match uiState.Mode with
+        | Running -> true
+        | Selecting
+        | Editing _ -> false
+
+    let selectedEditor () =
+        match uiState.Mode with
+        | Editing editor -> editor
+        | Selecting
+        | Running -> None
+
+    let withMode mode = uiState <- { uiState with Mode = mode }
+
+    let withSelectedEditor editor =
+        uiState <- { uiState with Mode = Editing editor }
+
+    let isDirty () =
+        match uiState.DocumentChange with
+        | Dirty
+        | DirtyWithExternalChanged -> true
+        | Clean
+        | ExternalChanged -> false
+
+    let hasExternalChanges () =
+        match uiState.DocumentChange with
+        | ExternalChanged
+        | DirtyWithExternalChanged -> true
+        | Clean
+        | Dirty -> false
+
+    let markDocumentDirty () =
+        uiState <-
+            { uiState with
+                DocumentChange =
+                    match uiState.DocumentChange with
+                    | Clean
+                    | Dirty -> Dirty
+                    | ExternalChanged
+                    | DirtyWithExternalChanged -> DirtyWithExternalChanged }
+
+    let markExternalChanged () =
+        uiState <-
+            { uiState with
+                DocumentChange =
+                    match uiState.DocumentChange with
+                    | Clean
+                    | ExternalChanged -> ExternalChanged
+                    | Dirty
+                    | DirtyWithExternalChanged -> DirtyWithExternalChanged }
+
+    let markDocumentClean () =
+        uiState <- { uiState with DocumentChange = Clean }
+
+    let withQuitConfirmation quitConfirmation =
+        uiState <-
+            { uiState with
+                QuitConfirmation = quitConfirmation }
 
     let formattingStatus () =
         if parsed.FormattingDiagnostics.IsEmpty then
@@ -456,26 +537,26 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
             | _ -> this.Close()
 
         let requestQuit () =
-            match quitConfirmation with
+            match uiState.QuitConfirmation with
             | Hidden ->
-                quitConfirmation <- Arming
+                withQuitConfirmation Arming
                 setStatus quitConfirmationMessage
 
                 Task
                     .Delay(1)
                     .ContinueWith(fun _ ->
-                        if quitConfirmation = Arming then
-                            quitConfirmation <- Armed)
+                        if uiState.QuitConfirmation = Arming then
+                            withQuitConfirmation Armed)
                 |> ignore
             | Arming -> setStatus quitConfirmationMessage
             | Armed -> quit ()
 
         let cancelQuitConfirmation () =
-            quitConfirmation <- Hidden
+            withQuitConfirmation Hidden
             restoreStatus status
 
         let applySelectedEdit () =
-            selectedEditor
+            selectedEditor ()
             |> Option.iter (fun editor ->
                 let currentSource =
                     cells
@@ -485,7 +566,7 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
 
                 if editor.Text <> currentSource then
                     cells <- cells |> replaceCellSource selectedIndex editor.Text
-                    isDirty <- true)
+                    markDocumentDirty ())
 
         let cellStack = StackPanel(Orientation = Orientation.Vertical, Spacing = 1.0)
         let mutable selectedFrame: Control option = None
@@ -493,20 +574,21 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
         let clearTerminalImages () = terminalImageLayer.Clear()
 
         let modeLabel () =
-            if isRunning then "running"
-            elif isEditing then "editing"
-            else "selection"
+            match uiState.Mode with
+            | Running -> "running"
+            | Editing _ -> "editing"
+            | Selecting -> "selection"
 
         let selectedRunnableCell () =
             cells
             |> List.tryItem selectedIndex
             |> Option.filter (fun cell -> cell.Kind = CellKind.Code)
 
-        let isSelectedEditor index = isEditing && index = selectedIndex
+        let isSelectedEditor index = isEditing () && index = selectedIndex
 
         let updateHeader () =
             let actions =
-                [ if not isEditing then
+                [ if not (isEditing ()) then
                       { Key = "↑↓"; Label = "move" }
                       { Key = "Enter"; Label = "edit" }
                       { Key = "A"; Label = "above" }
@@ -517,13 +599,13 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
 
                       { Key = "M/Y"; Label = "markdown/code" }
 
-                  if isEditing then
+                  if isEditing () then
                       { Key = "Esc"; Label = "select" }
 
                   if selectedRunnableCell () |> Option.isSome then
                       { Key = "F5"; Label = "run" }
 
-                  if isDirty && FilePersistence.canSave persistenceMode then
+                  if isDirty () && FilePersistence.canSave persistenceMode then
                       { Key = "Ctrl+S"; Label = "save" }
 
                   { Key = "Ctrl+C"; Label = "quit" } ]
@@ -541,25 +623,28 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
                     { AppName = "lfsi"
                       CellPosition = cellPosition
                       Mode = mode
-                      IsDirty = isDirty
+                      IsDirty = isDirty ()
                       Actions = actions }
 
         let markDirty originalSource editedSource =
-            if editedSource <> originalSource && not isDirty then
-                isDirty <- true
+            if editedSource <> originalSource && not (isDirty ()) then
+                markDocumentDirty ()
                 setStatus "Unsaved in-memory edits."
                 updateHeader ()
 
         let rebuildCells () =
             clearTerminalImages ()
-            selectedEditor <- None
+
+            if isEditing () then
+                withSelectedEditor None
+
             selectedFrame <- None
             cellStack.Children.Clear()
 
             cells
             |> List.iteri (fun index cell ->
                 if isSelectedEditor index then
-                    selectedEditor <-
+                    withSelectedEditor (
                         Some(
                             addEditableCell
                                 theme
@@ -574,6 +659,7 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
                                 index
                                 cell
                         )
+                    )
                 else
                     let frame =
                         addCellPreview
@@ -593,7 +679,7 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
 
             updateHeader ()
 
-            selectedEditor
+            selectedEditor ()
             |> Option.iter (fun editor ->
                 Dispatcher.UIThread.Post(fun () ->
                     editor.Focus() |> ignore
@@ -603,7 +689,7 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
             |> Option.iter (fun frame -> Dispatcher.UIThread.Post(fun () -> frame.BringIntoView()))
 
         let moveSelection delta =
-            if not isEditing && not cells.IsEmpty then
+            if not (isEditing ()) && not cells.IsEmpty then
                 let last = cells.Length - 1
                 let next = Math.Clamp(selectedIndex + delta, 0, last)
 
@@ -612,32 +698,32 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
                     rebuildCells ()
 
         let beginEditing () =
-            if not cells.IsEmpty && not isEditing && not isRunning then
-                isEditing <- true
+            if not cells.IsEmpty && not (isEditing ()) && not (isRunning ()) then
+                withMode (Editing None)
                 rebuildCells ()
 
         let addCellBelow () =
-            if not isEditing && not isRunning then
+            if not (isEditing ()) && not (isRunning ()) then
                 let insertIndex = if cells.IsEmpty then 0 else selectedIndex + 1
 
                 cells <- cells |> insertCellAt insertIndex (NotebookCell.create CellKind.Code "")
                 selectedIndex <- insertIndex
-                isDirty <- true
+                markDocumentDirty ()
                 setStatus "Added code cell below."
                 rebuildCells ()
 
         let addCellAbove () =
-            if not isEditing && not isRunning then
+            if not (isEditing ()) && not (isRunning ()) then
                 let insertIndex = if cells.IsEmpty then 0 else selectedIndex
 
                 cells <- cells |> insertCellAt insertIndex (NotebookCell.create CellKind.Code "")
                 selectedIndex <- insertIndex
-                isDirty <- true
+                markDocumentDirty ()
                 setStatus "Added code cell above."
                 rebuildCells ()
 
         let copyCell () =
-            if not isEditing && not isRunning then
+            if not (isEditing ()) && not (isRunning ()) then
                 cells
                 |> List.tryItem selectedIndex
                 |> Option.iter (fun cell ->
@@ -645,7 +731,7 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
                     setStatus "Copied cell.")
 
         let cutCell () =
-            if not isEditing && not isRunning then
+            if not (isEditing ()) && not (isRunning ()) then
                 cells
                 |> List.tryItem selectedIndex
                 |> Option.iter (fun cell ->
@@ -658,30 +744,30 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
                         else
                             Math.Clamp(selectedIndex, 0, cells.Length - 1)
 
-                    isDirty <- true
+                    markDocumentDirty ()
                     setStatus "Cut cell."
                     rebuildCells ())
 
         let pasteCellBelow () =
-            if not isEditing && not isRunning then
+            if not (isEditing ()) && not (isRunning ()) then
                 cellClipboard
                 |> Option.iter (fun cell ->
                     let insertIndex = if cells.IsEmpty then 0 else selectedIndex + 1
 
                     cells <- cells |> insertCellAt insertIndex (cloneCell cell)
                     selectedIndex <- insertIndex
-                    isDirty <- true
+                    markDocumentDirty ()
                     setStatus "Pasted cell below."
                     rebuildCells ())
 
         let convertSelectedCell kind =
-            if not isEditing && not isRunning then
+            if not (isEditing ()) && not (isRunning ()) then
                 cells
                 |> List.tryItem selectedIndex
                 |> Option.filter (fun cell -> cell.Kind <> kind)
                 |> Option.iter (fun cell ->
                     cells <- cells |> replaceCellAt selectedIndex { cell with Kind = kind; Outputs = [] }
-                    isDirty <- true
+                    markDocumentDirty ()
 
                     setStatus (
                         match kind with
@@ -704,9 +790,8 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
                 else
                     Math.Clamp(selectedIndex, 0, cells.Length - 1)
 
-            isDirty <- false
-            isEditing <- false
-            hasExternalChanges <- false
+            markDocumentClean ()
+            withMode Selecting
             setStatus message
             rebuildCells ()
 
@@ -715,7 +800,7 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
                 applySelectedEdit ()
 
                 let saveStatus =
-                    if hasExternalChanges then
+                    if hasExternalChanges () then
                         "Saved; external file changes overwritten."
                     else
                         "Saved."
@@ -732,8 +817,7 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
                     else
                         Math.Clamp(selectedIndex, 0, cells.Length - 1)
 
-                isDirty <- false
-                hasExternalChanges <- false
+                markDocumentClean ()
                 setStatus saveStatus
                 rebuildCells ()
             else
@@ -743,20 +827,25 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
             let fileChanged = FilePersistence.hasChanged path lastWriteTimeUtc
 
             match
-                FilePersistence.decideExternalChange persistenceMode fileChanged isDirty isEditing hasExternalChanges
+                FilePersistence.decideExternalChange
+                    persistenceMode
+                    fileChanged
+                    (isDirty ())
+                    (isEditing ())
+                    (hasExternalChanges ())
             with
             | IgnoreExternalChange -> ()
             | ReloadExternalChange -> reloadFromDisk "Reloaded external file changes."
             | KeepInMemoryAndNotify ->
-                hasExternalChanges <- true
+                markExternalChanged ()
                 setStatus "File changed on disk; in-memory edits kept."
 
         let endEditing () =
-            if isEditing then
+            if isEditing () then
                 applySelectedEdit ()
-                isEditing <- false
+                withMode Selecting
 
-                if hasExternalChanges && not isDirty then
+                if hasExternalChanges () && not (isDirty ()) then
                     reloadFromDisk "Reloaded external file changes."
                 else
                     rebuildCells ()
@@ -764,10 +853,9 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
         let runSelectedAsync () =
             task {
                 match selectedRunnableCell () with
-                | Some cell when not isRunning ->
-                    isRunning <- true
+                | Some cell when not (isRunning ()) ->
                     applySelectedEdit ()
-                    isEditing <- false
+                    withMode Running
                     setStatus "Running selected cell..."
                     rebuildCells ()
 
@@ -777,14 +865,14 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
                         do!
                             Dispatcher.UIThread.InvokeAsync(fun () ->
                                 cells <- cells |> replaceCellOutput selectedIndex result.Output
-                                isRunning <- false
+                                withMode Selecting
                                 setStatus "Ready"
                                 rebuildCells ())
                     with ex ->
                         do!
                             Dispatcher.UIThread.InvokeAsync(fun () ->
                                 cells <- cells |> replaceCellOutput selectedIndex (NotebookOutput.Error ex.Message)
-                                isRunning <- false
+                                withMode Selecting
                                 setStatus "Execution failed."
                                 rebuildCells ())
                 | _ -> ()
@@ -831,40 +919,40 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
                 elif args.Key = Key.F5 && (selectedRunnableCell () |> Option.isSome) then
                     args.Handled <- true
                     runSelectedAsync () |> ignore
-                elif args.Key = Key.A && args.KeyModifiers = KeyModifiers.None && not isEditing then
+                elif args.Key = Key.A && args.KeyModifiers = KeyModifiers.None && not (isEditing ()) then
                     args.Handled <- true
                     addCellAbove ()
-                elif args.Key = Key.B && args.KeyModifiers = KeyModifiers.None && not isEditing then
+                elif args.Key = Key.B && args.KeyModifiers = KeyModifiers.None && not (isEditing ()) then
                     args.Handled <- true
                     addCellBelow ()
-                elif args.Key = Key.X && args.KeyModifiers = KeyModifiers.None && not isEditing then
+                elif args.Key = Key.X && args.KeyModifiers = KeyModifiers.None && not (isEditing ()) then
                     args.Handled <- true
                     cutCell ()
-                elif args.Key = Key.C && args.KeyModifiers = KeyModifiers.None && not isEditing then
+                elif args.Key = Key.C && args.KeyModifiers = KeyModifiers.None && not (isEditing ()) then
                     args.Handled <- true
                     copyCell ()
-                elif args.Key = Key.V && args.KeyModifiers = KeyModifiers.None && not isEditing then
+                elif args.Key = Key.V && args.KeyModifiers = KeyModifiers.None && not (isEditing ()) then
                     args.Handled <- true
                     pasteCellBelow ()
-                elif args.Key = Key.M && args.KeyModifiers = KeyModifiers.None && not isEditing then
+                elif args.Key = Key.M && args.KeyModifiers = KeyModifiers.None && not (isEditing ()) then
                     args.Handled <- true
                     convertSelectedCell CellKind.Markdown
-                elif args.Key = Key.Y && args.KeyModifiers = KeyModifiers.None && not isEditing then
+                elif args.Key = Key.Y && args.KeyModifiers = KeyModifiers.None && not (isEditing ()) then
                     args.Handled <- true
                     convertSelectedCell CellKind.Code
-                elif args.Key = Key.Down && not isEditing then
+                elif args.Key = Key.Down && not (isEditing ()) then
                     args.Handled <- true
                     moveSelection 1
-                elif args.Key = Key.Up && not isEditing then
+                elif args.Key = Key.Up && not (isEditing ()) then
                     args.Handled <- true
                     moveSelection -1
-                elif args.Key = Key.Enter && not isEditing then
+                elif args.Key = Key.Enter && not (isEditing ()) then
                     args.Handled <- true
                     beginEditing ()
-                elif args.Key = Key.Escape && isEditing then
+                elif args.Key = Key.Escape && isEditing () then
                     args.Handled <- true
                     endEditing ()
-                elif args.Key = Key.Escape && quitConfirmation <> Hidden then
+                elif args.Key = Key.Escape && uiState.QuitConfirmation <> Hidden then
                     args.Handled <- true
                     cancelQuitConfirmation ()),
             RoutingStrategies.Tunnel,
