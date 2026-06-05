@@ -82,6 +82,10 @@ type NotebookMode =
     | Editing of TextBox option
     | Running
 
+type CellSelection =
+    | NoCells
+    | Selected of index: int
+
 type DocumentChangeState =
     | Clean
     | Dirty
@@ -138,8 +142,9 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
     let quitConfirmationMessage = "Press Ctrl+C again to quit, or Esc to cancel."
     let mutable parsed = initialParsed
     let mutable lastWriteTimeUtc = initialWriteTimeUtc
-    let mutable selectedIndex = 0
     let mutable cells = parsed.Document.Cells
+
+    let mutable selection = if cells.IsEmpty then NoCells else Selected 0
 
     let mutable uiState =
         { Mode = Selecting
@@ -147,6 +152,24 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
           QuitConfirmation = Hidden }
 
     let mutable cellClipboard: NotebookCell option = None
+
+    let selectedIndex () =
+        match selection with
+        | NoCells -> None
+        | Selected index -> Some index
+
+    let selectedIndexOrZero () =
+        selectedIndex () |> Option.defaultValue 0
+
+    let selectedCell () =
+        selectedIndex () |> Option.bind (fun index -> cells |> List.tryItem index)
+
+    let selectIndex index =
+        selection <-
+            if cells.IsEmpty then
+                NoCells
+            else
+                Selected(Math.Clamp(index, 0, cells.Length - 1))
 
     let isEditing () =
         match uiState.Mode with
@@ -239,12 +262,16 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
         visualOutputCache
         imageBackend
         renderCellSource
-        selectedIndex
+        selection
         (cellStack: StackPanel)
         index
         cell
         =
-        let isSelected = index = selectedIndex
+        let isSelected =
+            match selection with
+            | Selected selectedIndex -> index = selectedIndex
+            | NoCells -> false
+
         let body = StackPanel(Orientation = Orientation.Vertical, Spacing = 1.0)
 
         body.Children.Add(
@@ -550,15 +577,13 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
         let applySelectedEdit () =
             selectedEditor ()
             |> Option.iter (fun editor ->
-                let currentSource =
-                    cells
-                    |> List.tryItem selectedIndex
-                    |> Option.map _.Source
-                    |> Option.defaultValue ""
+                let currentSource = selectedCell () |> Option.map _.Source |> Option.defaultValue ""
 
                 if editor.Text <> currentSource then
-                    cells <- cells |> replaceCellSource selectedIndex editor.Text
-                    markDocumentDirty ())
+                    selectedIndex ()
+                    |> Option.iter (fun index ->
+                        cells <- cells |> replaceCellSource index editor.Text
+                        markDocumentDirty ()))
 
         let cellStack = StackPanel(Orientation = Orientation.Vertical, Spacing = 1.0)
         let mutable selectedFrame: Control option = None
@@ -572,11 +597,15 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
             | Selecting -> "selection"
 
         let selectedRunnableCell () =
-            cells
-            |> List.tryItem selectedIndex
-            |> Option.filter (fun cell -> cell.Kind = CellKind.Code)
+            selectedIndex ()
+            |> Option.bind (fun index ->
+                cells
+                |> List.tryItem index
+                |> Option.filter (fun cell -> cell.Kind = CellKind.Code)
+                |> Option.map (fun cell -> index, cell))
 
-        let isSelectedEditor index = isEditing () && index = selectedIndex
+        let isSelectedEditor index =
+            isEditing () && selection = Selected index
 
         let updateHeader () =
             let actions =
@@ -603,12 +632,14 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
                   { Key = "Ctrl+C"; Label = "quit" } ]
 
             let cellPosition =
-                if cells.IsEmpty then
-                    Some "no cells"
-                else
-                    Some(sprintf "%d/%d" (selectedIndex + 1) cells.Length)
+                match selection with
+                | NoCells -> Some "no cells"
+                | Selected selectedIndex -> Some(sprintf "%d/%d" (selectedIndex + 1) cells.Length)
 
-            let mode = if cells.IsEmpty then "selection" else modeLabel ()
+            let mode =
+                match selection with
+                | NoCells -> "selection"
+                | Selected _ -> modeLabel ()
 
             headerText.Text <-
                 NotebookHeader.render
@@ -661,12 +692,12 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
                             visualOutputCache
                             imageBackend
                             renderCellSource
-                            selectedIndex
+                            selection
                             cellStack
                             index
                             cell
 
-                    if index = selectedIndex then
+                    if selection = Selected index then
                         selectedFrame <- Some frame)
 
             updateHeader ()
@@ -681,60 +712,57 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
             |> Option.iter (fun frame -> Dispatcher.UIThread.Post(fun () -> frame.BringIntoView()))
 
         let moveSelection delta =
-            if not (isEditing ()) && not cells.IsEmpty then
+            match selection with
+            | Selected currentIndex when not (isEditing ()) ->
                 let last = cells.Length - 1
-                let next = Math.Clamp(selectedIndex + delta, 0, last)
+                let next = Math.Clamp(currentIndex + delta, 0, last)
 
-                if next <> selectedIndex then
-                    selectedIndex <- next
+                if next <> currentIndex then
+                    selection <- Selected next
                     rebuildCells ()
+            | NoCells
+            | Selected _ -> ()
 
         let beginEditing () =
-            if not cells.IsEmpty && not (isEditing ()) && not (isRunning ()) then
+            if (selectedCell ()).IsSome && not (isEditing ()) && not (isRunning ()) then
                 withMode (Editing None)
                 rebuildCells ()
 
         let addCellBelow () =
             if not (isEditing ()) && not (isRunning ()) then
-                let insertIndex = if cells.IsEmpty then 0 else selectedIndex + 1
+                let insertIndex = selectedIndex () |> Option.map ((+) 1) |> Option.defaultValue 0
 
                 cells <- cells |> insertCellAt insertIndex (NotebookCell.create CellKind.Code "")
-                selectedIndex <- insertIndex
+                selectIndex insertIndex
                 markDocumentDirty ()
                 setStatus "Added code cell below."
                 rebuildCells ()
 
         let addCellAbove () =
             if not (isEditing ()) && not (isRunning ()) then
-                let insertIndex = if cells.IsEmpty then 0 else selectedIndex
+                let insertIndex = selectedIndexOrZero ()
 
                 cells <- cells |> insertCellAt insertIndex (NotebookCell.create CellKind.Code "")
-                selectedIndex <- insertIndex
+                selectIndex insertIndex
                 markDocumentDirty ()
                 setStatus "Added code cell above."
                 rebuildCells ()
 
         let copyCell () =
             if not (isEditing ()) && not (isRunning ()) then
-                cells
-                |> List.tryItem selectedIndex
+                selectedCell ()
                 |> Option.iter (fun cell ->
                     cellClipboard <- Some cell
                     setStatus "Copied cell.")
 
         let cutCell () =
             if not (isEditing ()) && not (isRunning ()) then
-                cells
-                |> List.tryItem selectedIndex
-                |> Option.iter (fun cell ->
+                selectedIndex ()
+                |> Option.bind (fun index -> cells |> List.tryItem index |> Option.map (fun cell -> index, cell))
+                |> Option.iter (fun (index, cell) ->
                     cellClipboard <- Some cell
-                    cells <- cells |> removeCellAt selectedIndex
-
-                    selectedIndex <-
-                        if cells.IsEmpty then
-                            0
-                        else
-                            Math.Clamp(selectedIndex, 0, cells.Length - 1)
+                    cells <- cells |> removeCellAt index
+                    selectIndex index
 
                     markDocumentDirty ()
                     setStatus "Cut cell."
@@ -744,21 +772,21 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
             if not (isEditing ()) && not (isRunning ()) then
                 cellClipboard
                 |> Option.iter (fun cell ->
-                    let insertIndex = if cells.IsEmpty then 0 else selectedIndex + 1
+                    let insertIndex = selectedIndex () |> Option.map ((+) 1) |> Option.defaultValue 0
 
                     cells <- cells |> insertCellAt insertIndex (cloneCell cell)
-                    selectedIndex <- insertIndex
+                    selectIndex insertIndex
                     markDocumentDirty ()
                     setStatus "Pasted cell below."
                     rebuildCells ())
 
         let convertSelectedCell kind =
             if not (isEditing ()) && not (isRunning ()) then
-                cells
-                |> List.tryItem selectedIndex
-                |> Option.filter (fun cell -> cell.Kind <> kind)
-                |> Option.iter (fun cell ->
-                    cells <- cells |> replaceCellAt selectedIndex { cell with Kind = kind; Outputs = [] }
+                selectedIndex ()
+                |> Option.bind (fun index -> cells |> List.tryItem index |> Option.map (fun cell -> index, cell))
+                |> Option.filter (fun (_, cell) -> cell.Kind <> kind)
+                |> Option.iter (fun (index, cell) ->
+                    cells <- cells |> replaceCellAt index { cell with Kind = kind; Outputs = [] }
                     markDocumentDirty ()
 
                     setStatus (
@@ -776,11 +804,7 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
             cells <- parsed.Document.Cells
             highlightedCodeCache.Clear()
 
-            selectedIndex <-
-                if cells.IsEmpty then
-                    0
-                else
-                    Math.Clamp(selectedIndex, 0, cells.Length - 1)
+            selectIndex (selectedIndexOrZero ())
 
             markDocumentClean ()
             withMode Selecting
@@ -803,11 +827,7 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
                 cells <- parsed.Document.Cells
                 highlightedCodeCache.Clear()
 
-                selectedIndex <-
-                    if cells.IsEmpty then
-                        0
-                    else
-                        Math.Clamp(selectedIndex, 0, cells.Length - 1)
+                selectIndex (selectedIndexOrZero ())
 
                 markDocumentClean ()
                 setStatus saveStatus
@@ -845,14 +865,21 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
         let runSelectedAsync () =
             task {
                 match selectedRunnableCell () with
-                | Some cell when not (isRunning ()) ->
+                | Some(selectedIndex, cell) when not (isRunning ()) ->
                     applySelectedEdit ()
+
+                    let source =
+                        cells
+                        |> List.tryItem selectedIndex
+                        |> Option.map _.Source
+                        |> Option.defaultValue cell.Source
+
                     withMode Running
                     setStatus "Running selected cell..."
                     rebuildCells ()
 
                     try
-                        let! result = fsi.ExecuteAsync(cell.Source, CancellationToken.None)
+                        let! result = fsi.ExecuteAsync(source, CancellationToken.None)
 
                         do!
                             Dispatcher.UIThread.InvokeAsync(fun () ->
