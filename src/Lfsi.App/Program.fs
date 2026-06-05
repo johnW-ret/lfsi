@@ -236,9 +236,7 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
     let renderCellSourceControl theme renderCodeSource cell =
         match cell.Kind with
         | CellKind.Code -> renderCodeSource (cell.Source.TrimEnd())
-        | CellKind.Markdown ->
-            TextBlock(Text = cell.Source.TrimEnd(), Foreground = theme.Text, TextWrapping = TextWrapping.NoWrap)
-            :> Control
+        | CellKind.Markdown -> MarkdownRendering.render theme (cell.Source.TrimEnd())
 
     let addCellPreview
         theme
