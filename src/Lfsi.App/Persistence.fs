@@ -46,7 +46,7 @@ module FilePersistence =
         |> String.concat ""
 
     let load path =
-        LiterateScript.parse (Some path) (File.ReadAllText path), File.GetLastWriteTimeUtc path
+        LiterateScript.parseCellsOnly (Some path) (File.ReadAllText path), File.GetLastWriteTimeUtc path
 
     let save path cells =
         File.WriteAllText(path, toSource cells)

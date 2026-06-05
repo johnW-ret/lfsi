@@ -154,6 +154,14 @@ module LiterateScript =
 
         loop 0 false []
 
+    let parseCellsOnly (sourcePath: string option) (source: string) =
+        let source = normalizeNewlines source
+
+        { Document =
+            { SourcePath = sourcePath
+              Cells = parseCells source }
+          FormattingDiagnostics = [] }
+
     let parse (sourcePath: string option) (source: string) =
         let source = normalizeNewlines source
 
