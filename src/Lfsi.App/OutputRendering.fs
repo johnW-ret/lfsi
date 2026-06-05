@@ -338,6 +338,8 @@ type ChromeCdpVisualOutputService(?chromePath: string, ?viewportWidth: int, ?vie
                                         String.concat
                                             " "
                                             [ "--headless=new"
+                                              "--no-sandbox"
+                                              "--disable-dev-shm-usage"
                                               "--disable-gpu"
                                               "--hide-scrollbars"
                                               "--no-first-run"
