@@ -4,14 +4,30 @@ open System
 open System.IO
 open Microsoft.Extensions.Configuration
 
-type FsiConfiguration = { ExecutablePath: string }
+type FsiExecutable =
+    | DotnetOnPath
+    | CustomExecutable of string
+
+type FsiConfiguration = { Executable: FsiExecutable }
 
 type LfsiConfiguration = { Fsi: FsiConfiguration }
 
 module LfsiConfiguration =
-    let private defaultFsi = { ExecutablePath = "dotnet" }
+    let private defaultFsi = { Executable = DotnetOnPath }
 
     let private defaultConfig = { Fsi = defaultFsi }
+
+    let private parseFsiExecutable value =
+        value
+        |> Option.ofObj
+        |> Option.filter (String.IsNullOrWhiteSpace >> not)
+        |> Option.map CustomExecutable
+        |> Option.defaultValue defaultConfig.Fsi.Executable
+
+    let fsiExecutablePath executable =
+        match executable with
+        | DotnetOnPath -> "dotnet"
+        | CustomExecutable path -> path
 
     let load () =
         let configuration =
@@ -21,9 +37,4 @@ module LfsiConfiguration =
                 .AddJsonFile("lfsi.json", optional = true, reloadOnChange = false)
                 .Build()
 
-        { Fsi =
-            { ExecutablePath =
-                configuration["Fsi:ExecutablePath"]
-                |> Option.ofObj
-                |> Option.filter (String.IsNullOrWhiteSpace >> not)
-                |> Option.defaultValue defaultConfig.Fsi.ExecutablePath } }
+        { Fsi = { Executable = parseFsiExecutable configuration["Fsi:ExecutablePath"] } }

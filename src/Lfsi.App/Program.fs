@@ -188,7 +188,11 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
         | UseTextFallback _ -> false
 
     let fsi =
-        new FsiSession(fsiWorkingDirectory, configuration.Fsi.ExecutablePath, richDisplayEnabled)
+        new FsiSession(
+            fsiWorkingDirectory,
+            LfsiConfiguration.fsiExecutablePath configuration.Fsi.Executable,
+            richDisplayEnabled
+        )
 
     let quitConfirmationMessage = "Press Ctrl+C again to quit, or Esc to cancel."
     let mutable parsed = initialParsed
