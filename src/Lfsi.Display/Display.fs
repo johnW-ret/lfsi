@@ -47,9 +47,19 @@ module Display =
         Output.emitEncodedMime (mimeTypeValue Png) value
 
     module private Formatting =
+        let private looksVisualHtml (value: string) =
+            let value = value.TrimStart()
+
+            value.Contains("<svg", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("<canvas", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("<script", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("<img", StringComparison.OrdinalIgnoreCase)
+
         let tryFormatHtml (value: obj) =
             try
-                Some(Formatter.ToDisplayString(value, "text/html"))
+                Formatter.ToDisplayString(value, "text/html")
+                |> Option.ofObj
+                |> Option.filter looksVisualHtml
             with _ ->
                 None
 
