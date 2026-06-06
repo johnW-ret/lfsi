@@ -204,6 +204,12 @@ type NotebookWindow(initialPath: string option, configuration: LfsiConfiguration
             richDisplayEnabled
         )
 
+    let completionService: ICompletionService =
+        if configuration.FsAutoComplete.Enabled then
+            new FsAutoCompleteCompletionService(fsiWorkingDirectory, initialPath)
+        else
+            new DisabledCompletionService()
+
     let quitConfirmationMessage = "Press Ctrl+C again to quit, or Esc to cancel."
     let mutable parsed = initialParsed
     let mutable lastWriteTimeUtc = initialWriteTimeUtc
@@ -436,6 +442,8 @@ type NotebookWindow(initialPath: string option, configuration: LfsiConfiguration
         errorBrush
         visualOutputCache
         imageBackend
+        (completionService: ICompletionService)
+        (getCompletionContext: string -> int -> CompletionContext)
         renderCodeSource
         updateHighlightedCode
         (cellStack: StackPanel)
@@ -465,6 +473,11 @@ type NotebookWindow(initialPath: string option, configuration: LfsiConfiguration
             | CellKind.Code -> Some(renderCodeSource (editor.Text |> Option.ofObj |> Option.defaultValue ""))
             | CellKind.Markdown -> None
 
+        let completionPopup =
+            match cell.Kind with
+            | CellKind.Code -> Some(EditorCompletion.attach theme editor completionService getCompletionContext)
+            | CellKind.Markdown -> None
+
         editor.TextChanged.Add(fun _ ->
             let editorText = editor.Text |> Option.ofObj |> Option.defaultValue ""
 
@@ -476,16 +489,18 @@ type NotebookWindow(initialPath: string option, configuration: LfsiConfiguration
         editor.AddHandler(
             InputElement.KeyDownEvent,
             (fun _ args ->
-                match tryGetWordJumpDirection args with
-                | Some direction ->
-                    args.Handled <- true
-                    moveEditorCaretByWord direction editor
-                | None -> ()),
+                if not args.Handled then
+                    match tryGetWordJumpDirection args with
+                    | Some direction ->
+                        args.Handled <- true
+                        moveEditorCaretByWord direction editor
+                    | None -> ()),
             RoutingStrategies.Tunnel,
             true
         )
 
         body.Children.Add(editor) |> ignore
+        completionPopup |> Option.iter (fun popup -> body.Children.Add popup |> ignore)
 
         highlightedEditor
         |> Option.iter (fun block -> body.Children.Add block |> ignore)
@@ -506,7 +521,7 @@ type NotebookWindow(initialPath: string option, configuration: LfsiConfiguration
 
     let replaceCellSource selectedIndex source cells =
         cells
-        |> List.mapi (fun index cell ->
+        |> List.mapi (fun index (cell: NotebookCell) ->
             if index = selectedIndex then
                 { cell with Source = source }
             else
@@ -581,6 +596,32 @@ type NotebookWindow(initialPath: string option, configuration: LfsiConfiguration
                 FallbackVisualOutputService() :> IVisualOutputService
 
         let visualOutputCache = MemoryVisualOutputCache visualOutputService
+
+        let completionContext selectedIndex editorText caretIndex =
+            let mutable cursorOffset = 0
+
+            let sources =
+                cells
+                |> List.indexed
+                |> List.choose (fun (index, notebookCell) ->
+                    if notebookCell.Kind <> CellKind.Code then
+                        None
+                    else
+                        let source =
+                            if index = selectedIndex then
+                                editorText
+                            else
+                                notebookCell.Source
+
+                        if index = selectedIndex then
+                            cursorOffset <- cursorOffset + caretIndex
+                        elif index < selectedIndex then
+                            cursorOffset <- cursorOffset + source.Length + 2
+
+                        Some source)
+
+            { Source = String.concat "\n\n" sources
+              CursorOffset = cursorOffset }
 
         let imageBackend, terminalImageLayer =
             match terminalGraphicsDecision with
@@ -757,6 +798,8 @@ type NotebookWindow(initialPath: string option, configuration: LfsiConfiguration
                                 errorBrush
                                 visualOutputCache
                                 imageBackend
+                                completionService
+                                (completionContext index)
                                 renderCodeSource
                                 updateHighlightedCode
                                 cellStack
@@ -1128,7 +1171,9 @@ type NotebookWindow(initialPath: string option, configuration: LfsiConfiguration
         this.AddHandler(
             InputElement.KeyDownEvent,
             (fun _ args ->
-                if handleSavePrompt args then
+                if args.Handled then
+                    ()
+                elif handleSavePrompt args then
                     ()
                 elif args.KeyModifiers = KeyModifiers.Control && args.Key = Key.C then
                     args.Handled <- true
@@ -1183,6 +1228,7 @@ type NotebookWindow(initialPath: string option, configuration: LfsiConfiguration
         )
 
     override _.OnClosed(args) =
+        completionService.Dispose()
         (fsi :> IDisposable).Dispose()
         base.OnClosed(args)
 

@@ -11,6 +11,8 @@
     <Compile Include="TerminalGraphics.fs" />
     <Compile Include="OutputRendering.fs" />
     <Compile Include="SyntaxHighlighting.fs" />
+    <Compile Include="FsAutoComplete.fs" />
+    <Compile Include="EditorCompletion.fs" />
     <Compile Include="MarkdownRendering.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
@@ -25,6 +27,9 @@
     <PackageReference Include="FSharp.Compiler.Service" Version="43.12.201" />
     <PackageReference Include="Markdig" Version="0.44.0" />
     <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="10.0.0" />
+    <PackageReference Include="Nerdbank.MessagePack" Version="1.2.4" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <PackageReference Include="StreamJsonRpc" Version="2.24.92" />
   </ItemGroup>
 
 </Project>
