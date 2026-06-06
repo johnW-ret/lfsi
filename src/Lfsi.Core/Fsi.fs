@@ -89,7 +89,10 @@ type FsiSession(?workingDirectory: string, ?executablePath: string, ?enableRichD
                 line)
         |> Array.filter (fun line ->
             let trimmed = line.Trim()
-            trimmed <> ">" && trimmed <> "val it: unit = ()")
+
+            trimmed <> ">"
+            && trimmed <> "val it: unit = ()"
+            && not (trimmed.StartsWith("val __lfsi_marker_", StringComparison.Ordinal)))
         |> String.concat Environment.NewLine
         |> fun value -> value.Trim()
 
