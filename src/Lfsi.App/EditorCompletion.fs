@@ -30,6 +30,16 @@ module EditorCompletion =
 
         index
 
+    let private matchingItems caretIndex (source: string) items =
+        let start = prefixStart caretIndex source
+        let prefix = source.Substring(start, caretIndex - start)
+
+        if String.IsNullOrEmpty prefix then
+            items
+        else
+            items
+            |> List.filter (fun item -> item.Label.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+
     let private shouldRequest force caretIndex (source: string) =
         if force then
             true
@@ -136,7 +146,7 @@ module EditorCompletion =
                                 && text editor = source
                                 && editor.CaretIndex = caretIndex
                             then
-                                items <- completions |> List.truncate 12
+                                items <- completions |> matchingItems caretIndex source |> List.truncate 12
 
                                 suggestions.ItemsSource <-
                                     items

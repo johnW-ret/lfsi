@@ -32,6 +32,7 @@ type FsAutoCompleteCompletionService(workingDirectory: string, documentPath: str
     let mutable rpc: JsonRpc option = None
     let mutable initialized = false
     let mutable documentOpened = false
+    let mutable synchronizedSource: string option = None
     let mutable version = 0
 
     let documentUri =
@@ -55,6 +56,18 @@ type FsAutoCompleteCompletionService(workingDirectory: string, documentPath: str
                 character <- character + 1
 
         {| line = line; character = character |}
+
+    let completionPrefix context =
+        let offset = Math.Clamp(context.CursorOffset, 0, context.Source.Length)
+        let mutable startIndex = offset
+
+        let isIdentifierCharacter value =
+            Char.IsLetterOrDigit value || value = '_' || value = char 39
+
+        while startIndex > 0 && isIdentifierCharacter context.Source.[startIndex - 1] do
+            startIndex <- startIndex - 1
+
+        context.Source.Substring(startIndex, offset - startIndex)
 
     let resolveExecutable () =
         let executableName =
@@ -154,31 +167,34 @@ type FsAutoCompleteCompletionService(workingDirectory: string, documentPath: str
 
     let synchronizeDocument (connection: JsonRpc) source =
         task {
-            version <- version + 1
+            if synchronizedSource <> Some source then
+                version <- version + 1
 
-            if documentOpened then
-                do!
-                    connection.NotifyAsync(
-                        "textDocument/didChange",
-                        box
-                            {| textDocument =
-                                {| uri = documentUri
-                                   version = version |}
-                               contentChanges = [| {| text = source |} |] |}
-                    )
-            else
-                do!
-                    connection.NotifyAsync(
-                        "textDocument/didOpen",
-                        box
-                            {| textDocument =
-                                {| uri = documentUri
-                                   languageId = "fsharp"
-                                   version = version
-                                   text = source |} |}
-                    )
+                if documentOpened then
+                    do!
+                        connection.NotifyAsync(
+                            "textDocument/didChange",
+                            box
+                                {| textDocument =
+                                    {| uri = documentUri
+                                       version = version |}
+                                   contentChanges = [| {| text = source |} |] |}
+                        )
+                else
+                    do!
+                        connection.NotifyAsync(
+                            "textDocument/didOpen",
+                            box
+                                {| textDocument =
+                                    {| uri = documentUri
+                                       languageId = "fsharp"
+                                       version = version
+                                       text = source |} |}
+                        )
 
-                documentOpened <- true
+                    documentOpened <- true
+
+                synchronizedSource <- Some source
         }
 
     let parseCompletionItem (item: JToken) =
@@ -208,15 +224,63 @@ type FsAutoCompleteCompletionService(workingDirectory: string, documentPath: str
 
     let parseCompletionResult (result: JToken) =
         let items =
-            match result with
-            | :? JArray as array -> array :> seq<JToken>
-            | _ ->
-                result.["items"]
+            match Option.ofObj result with
+            | None -> Seq.empty
+            | Some(:? JArray as array) -> array :> seq<JToken>
+            | Some value ->
+                value.["items"]
                 |> Option.ofObj
-                |> Option.map (fun value -> value.Children() |> Seq.cast<JToken>)
+                |> Option.map (fun items -> items.Children() |> Seq.cast<JToken>)
                 |> Option.defaultValue Seq.empty
 
-        items |> Seq.choose parseCompletionItem |> Seq.truncate 50 |> List.ofSeq
+        items |> Seq.choose parseCompletionItem |> List.ofSeq
+
+    let parseSignatureParameters (result: JToken) =
+        let parameterName (signatureLabel: string) (parameter: JToken) =
+            let label = parameter.["label"]
+
+            let text =
+                match label with
+                | :? JArray as range when range.Count = 2 ->
+                    let startIndex = range.[0].Value<int>()
+                    let endIndex = range.[1].Value<int>()
+
+                    if startIndex >= 0 && endIndex >= startIndex && endIndex <= signatureLabel.Length then
+                        signatureLabel.Substring(startIndex, endIndex - startIndex)
+                    else
+                        ""
+                | null -> ""
+                | value -> value.Value<string>() |> Option.ofObj |> Option.defaultValue ""
+
+            text.Trim().TrimStart('?').Split([| ':'; ' '; '=' |], StringSplitOptions.RemoveEmptyEntries)
+            |> Array.tryHead
+            |> Option.filter (String.IsNullOrWhiteSpace >> not)
+
+        match Option.ofObj result with
+        | None -> []
+        | Some value ->
+            value.["signatures"]
+            |> Option.ofObj
+            |> Option.map (fun signatures -> signatures.Children() :> seq<JToken>)
+            |> Option.defaultValue Seq.empty
+            |> Seq.collect (fun signature ->
+                let signatureLabel =
+                    signature.["label"]
+                    |> Option.ofObj
+                    |> Option.bind (fun label -> label.Value<string>() |> Option.ofObj)
+                    |> Option.defaultValue ""
+
+                signature.["parameters"]
+                |> Option.ofObj
+                |> Option.map (fun parameters -> parameters.Children() :> seq<JToken>)
+                |> Option.defaultValue Seq.empty
+                |> Seq.choose (parameterName signatureLabel))
+            |> Seq.distinct
+            |> Seq.map (fun name ->
+                { Label = name
+                  InsertText = name
+                  Detail = Some "parameter" })
+            |> List.ofSeq
 
     interface ICompletionService with
         member _.CompleteAsync(context, cancellationToken) =
@@ -234,14 +298,51 @@ type FsAutoCompleteCompletionService(workingDirectory: string, documentPath: str
                                position = positionAt context.CursorOffset context.Source
                                context = {| triggerKind = 1 |} |}
 
-                        let! result =
-                            connection.InvokeWithCancellationAsync<JToken>(
-                                "textDocument/completion",
-                                [| box parameters |],
-                                cancellationToken
-                            )
+                        let signatureParameters =
+                            {| textDocument = parameters.textDocument
+                               position = parameters.position |}
 
-                        return parseCompletionResult result
+                        let! completionItems =
+                            task {
+                                try
+                                    let! result =
+                                        connection.InvokeWithCancellationAsync<JToken>(
+                                            "textDocument/completion",
+                                            [| box parameters |],
+                                            cancellationToken
+                                        )
+
+                                    return parseCompletionResult result
+                                with :? RemoteRpcException ->
+                                    return []
+                            }
+
+                        let! signatureItems =
+                            task {
+                                let prefix = completionPrefix context
+
+                                if
+                                    String.IsNullOrEmpty prefix
+                                    || completionItems
+                                       |> List.exists (fun item ->
+                                           item.Label.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                                then
+                                    return []
+                                else
+                                    try
+                                        let! result =
+                                            connection.InvokeWithCancellationAsync<JToken>(
+                                                "textDocument/signatureHelp",
+                                                [| box signatureParameters |],
+                                                cancellationToken
+                                            )
+
+                                        return parseSignatureParameters result
+                                    with :? RemoteRpcException ->
+                                        return []
+                            }
+
+                        return List.append signatureItems completionItems |> List.distinctBy _.Label
                     finally
                         gate.Release() |> ignore
                 with
