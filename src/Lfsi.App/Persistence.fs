@@ -13,6 +13,13 @@ type ExternalChangeDecision =
     | KeepInMemoryAndNotify
 
 module FilePersistence =
+    let newDocument () =
+        { Document =
+            { SourcePath = None
+              Cells = [ NotebookCell.create CellKind.Code "" ] }
+          FormattingDiagnostics = [] },
+        System.DateTime.MinValue
+
     let private renderCell cell =
         match cell.Kind with
         | Code -> cell.Source
@@ -46,7 +53,18 @@ module FilePersistence =
         |> String.concat ""
 
     let load path =
-        LiterateScript.parseCellsOnly (Some path) (File.ReadAllText path), File.GetLastWriteTimeUtc path
+        let parsed = LiterateScript.parseCellsOnly (Some path) (File.ReadAllText path)
+
+        let parsed =
+            if parsed.Document.Cells.IsEmpty then
+                { parsed with
+                    Document =
+                        { parsed.Document with
+                            Cells = [ NotebookCell.create CellKind.Code "" ] } }
+            else
+                parsed
+
+        parsed, File.GetLastWriteTimeUtc path
 
     let save path cells =
         File.WriteAllText(path, toSource cells)

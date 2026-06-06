@@ -123,6 +123,10 @@ type NotebookUiState =
       DocumentChange: DocumentChangeState
       QuitConfirmation: QuitConfirmation }
 
+type SavePrompt =
+    | SavePromptInactive
+    | SavePromptActive of TextBox
+
 module NotebookHeader =
     let private renderKey key =
         match key with
@@ -167,19 +171,21 @@ module NotebookHeader =
 
         model.AppName + position + dirty + "  " + model.Mode + "  " + actions
 
-type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
+type NotebookWindow(initialPath: string option, configuration: LfsiConfiguration) as this =
     inherit Window(Title = "lfsi notebook", WindowState = WindowState.Maximized)
 
-    let initialParsed, initialWriteTimeUtc = FilePersistence.load path
+    let initialParsed, initialWriteTimeUtc =
+        initialPath
+        |> Option.map FilePersistence.load
+        |> Option.defaultWith FilePersistence.newDocument
+
     let persistenceMode = AutoReloadWhenClean
 
     let fsiWorkingDirectory =
-        let directory = Path.GetDirectoryName path
-
-        if String.IsNullOrWhiteSpace directory then
-            Environment.CurrentDirectory
-        else
-            directory
+        initialPath
+        |> Option.map Path.GetDirectoryName
+        |> Option.filter (String.IsNullOrWhiteSpace >> not)
+        |> Option.defaultValue Environment.CurrentDirectory
 
     let terminalGraphicsDecision =
         TerminalGraphics.currentEnvironment () |> TerminalGraphics.decide
@@ -201,6 +207,7 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
     let quitConfirmationMessage = "Press Ctrl+C again to quit, or Esc to cancel."
     let mutable parsed = initialParsed
     let mutable lastWriteTimeUtc = initialWriteTimeUtc
+    let mutable documentPath = initialPath
     let mutable cells = parsed.Document.Cells
 
     let mutable selection = if cells.IsEmpty then NoCells else Selected 0
@@ -607,7 +614,14 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
                 TextWrapping = TextWrapping.Wrap
             )
 
+        let footer = ContentControl(Content = status)
+        let mutable savePrompt = SavePromptInactive
+
         let setStatus message = status.Text <- message
+
+        let showStatus () =
+            savePrompt <- SavePromptInactive
+            footer.Content <- status
 
         let quit () =
             match Application.Current.ApplicationLifetime with
@@ -694,7 +708,7 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
                   if runnableCells () |> List.isEmpty |> not then
                       { Key = F6; Label = RunAll }
 
-                  if isDirty () && FilePersistence.canSave persistenceMode then
+                  if isDirty () then
                       { Key = CtrlS; Label = Save }
 
                   { Key = CtrlC; Label = Quit } ]
@@ -866,23 +880,23 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
                     rebuildCells ())
 
         let reloadFromDisk message =
-            let nextParsed, nextWriteTimeUtc = FilePersistence.load path
-            parsed <- nextParsed
-            lastWriteTimeUtc <- nextWriteTimeUtc
-            cells <- parsed.Document.Cells
-            highlightedCodeCache.Clear()
+            documentPath
+            |> Option.iter (fun path ->
+                let nextParsed, nextWriteTimeUtc = FilePersistence.load path
+                parsed <- nextParsed
+                lastWriteTimeUtc <- nextWriteTimeUtc
+                cells <- parsed.Document.Cells
+                highlightedCodeCache.Clear()
 
-            selectIndex (selectedIndexOrZero ())
+                selectIndex (selectedIndexOrZero ())
 
-            markDocumentClean ()
-            withMode Selecting
-            setStatus message
-            rebuildCells ()
+                markDocumentClean ()
+                withMode Selecting
+                setStatus message
+                rebuildCells ())
 
-        let saveToDisk () =
-            if FilePersistence.canSave persistenceMode then
-                applySelectedEdit ()
-
+        let saveAtPath path =
+            try
                 let saveStatus =
                     if hasExternalChanges () then
                         "Saved; external file changes overwritten."
@@ -890,6 +904,7 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
                         "Saved."
 
                 let nextParsed, nextWriteTimeUtc = FilePersistence.save path cells
+                documentPath <- Some path
                 parsed <- nextParsed
                 lastWriteTimeUtc <- nextWriteTimeUtc
                 cells <- parsed.Document.Cells
@@ -900,25 +915,89 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
                 markDocumentClean ()
                 setStatus saveStatus
                 rebuildCells ()
+            with ex ->
+                setStatus $"Save failed: {ex.Message}"
+
+        let cancelSavePrompt () =
+            showStatus ()
+            setStatus "Save cancelled."
+
+        let completeSavePrompt (input: TextBox) =
+            let fileName = input.Text.Trim()
+
+            if String.IsNullOrWhiteSpace fileName then
+                input.Watermark <- "Enter a file name"
             else
-                setStatus "Saving is disabled."
+                try
+                    let path =
+                        if Path.IsPathFullyQualified fileName then
+                            Path.GetFullPath fileName
+                        else
+                            Path.GetFullPath(fileName, Environment.CurrentDirectory)
+
+                    showStatus ()
+                    saveAtPath path
+                with ex ->
+                    showStatus ()
+                    setStatus $"Invalid file name: {ex.Message}"
+
+        let beginSavePrompt () =
+            let input =
+                TextBox(Text = "", Watermark = "file.fsx", HorizontalAlignment = HorizontalAlignment.Stretch)
+
+            let prompt = DockPanel(Background = theme.Dark)
+
+            let label =
+                TextBlock(Text = "Save as: ", Foreground = theme.Muted, Background = theme.Dark)
+
+            DockPanel.SetDock(label, Dock.Left)
+            prompt.Children.Add(label) |> ignore
+            prompt.Children.Add(input) |> ignore
+            savePrompt <- SavePromptActive input
+            footer.Content <- prompt
+
+            Dispatcher.UIThread.Post(fun () ->
+                input.Focus() |> ignore
+                input.CaretIndex <- input.Text.Length)
+
+        let saveToDisk () =
+            applySelectedEdit ()
+
+            match documentPath with
+            | Some path -> saveAtPath path
+            | None -> beginSavePrompt ()
+
+        let handleSavePrompt (args: KeyEventArgs) =
+            match savePrompt with
+            | SavePromptActive input when args.Key = Key.Enter ->
+                args.Handled <- true
+                completeSavePrompt input
+                true
+            | SavePromptActive _ when args.Key = Key.Escape ->
+                args.Handled <- true
+                cancelSavePrompt ()
+                true
+            | SavePromptActive _ -> true
+            | SavePromptInactive -> false
 
         let checkExternalChange () =
-            let fileChanged = FilePersistence.hasChanged path lastWriteTimeUtc
+            documentPath
+            |> Option.iter (fun path ->
+                let fileChanged = FilePersistence.hasChanged path lastWriteTimeUtc
 
-            match
-                FilePersistence.decideExternalChange
-                    persistenceMode
-                    fileChanged
-                    (isDirty ())
-                    (isEditing ())
-                    (hasExternalChanges ())
-            with
-            | IgnoreExternalChange -> ()
-            | ReloadExternalChange -> reloadFromDisk "Reloaded external file changes."
-            | KeepInMemoryAndNotify ->
-                markExternalChanged ()
-                setStatus "File changed on disk; in-memory edits kept."
+                match
+                    FilePersistence.decideExternalChange
+                        persistenceMode
+                        fileChanged
+                        (isDirty ())
+                        (isEditing ())
+                        (hasExternalChanges ())
+                with
+                | IgnoreExternalChange -> ()
+                | ReloadExternalChange -> reloadFromDisk "Reloaded external file changes."
+                | KeepInMemoryAndNotify ->
+                    markExternalChanged ()
+                    setStatus "File changed on disk; in-memory edits kept.")
 
         let endEditing () =
             if isEditing () then
@@ -1026,10 +1105,10 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
 
 
         DockPanel.SetDock(header, Dock.Top)
-        DockPanel.SetDock(status, Dock.Bottom)
+        DockPanel.SetDock(footer, Dock.Bottom)
         header.Children.Add(headerText) |> ignore
         root.Children.Add(header) |> ignore
-        root.Children.Add(status) |> ignore
+        root.Children.Add(footer) |> ignore
         root.Children.Add(scroll) |> ignore
 
         base.RequestedThemeVariant <- Styling.ThemeVariant.Dark
@@ -1049,7 +1128,9 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
         this.AddHandler(
             InputElement.KeyDownEvent,
             (fun _ args ->
-                if args.KeyModifiers = KeyModifiers.Control && args.Key = Key.C then
+                if handleSavePrompt args then
+                    ()
+                elif args.KeyModifiers = KeyModifiers.Control && args.Key = Key.C then
                     args.Handled <- true
                     requestQuit ()
                 elif args.KeyModifiers = KeyModifiers.Control && args.Key = Key.S then
@@ -1105,7 +1186,7 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
         (fsi :> IDisposable).Dispose()
         base.OnClosed(args)
 
-type App(path: string, configuration: LfsiConfiguration) =
+type App(path: string option, configuration: LfsiConfiguration) =
     inherit Application()
 
     override this.Initialize() = this.Styles.Add(ModernTheme())
@@ -1144,7 +1225,8 @@ module Program =
             let html = LiterateScript.toHtml (Some file) (File.ReadAllText file)
             printf "%s" html
             0
-        | file :: _ when File.Exists file -> (buildApp file).StartWithConsoleLifetime(argv)
+        | file :: _ when File.Exists file -> (buildApp (Some(Path.GetFullPath file))).StartWithConsoleLifetime(argv)
+        | [] -> (buildApp None).StartWithConsoleLifetime(argv)
         | _ ->
-            eprintfn "Pass an .fsx file path."
+            eprintfn "File not found."
             1
