@@ -1489,6 +1489,16 @@ module OutputRendering =
     let private imageFallback (frame: ImageFrame) =
         sprintf "%s Terminal graphics backend is unavailable." (binaryDescription frame.MimeType frame.Bytes)
 
+    let private looksVisualHtml (html: string) =
+        html.Contains("<svg", StringComparison.OrdinalIgnoreCase)
+        || html.Contains("<canvas", StringComparison.OrdinalIgnoreCase)
+        || html.Contains("<script", StringComparison.OrdinalIgnoreCase)
+        || html.Contains("<img", StringComparison.OrdinalIgnoreCase)
+        || html.Contains("<video", StringComparison.OrdinalIgnoreCase)
+        || html.Contains("<object", StringComparison.OrdinalIgnoreCase)
+        || html.Contains("<embed", StringComparison.OrdinalIgnoreCase)
+        || html.Contains("<iframe", StringComparison.OrdinalIgnoreCase)
+
     let private renderImage (theme: NotebookTheme) (imageBackend: ITerminalImageBackend) frame =
         match imageBackend.RenderImage frame with
         | Some control -> control
@@ -1500,10 +1510,11 @@ module OutputRendering =
         | NotebookOutput.Display display ->
             match display.MimeType, display.Payload with
             | MimeTypes.Text, TextPayload value -> textBlock theme.Muted value
-            | MimeTypes.Html, TextPayload html ->
+            | MimeTypes.Html, TextPayload html when looksVisualHtml html ->
                 match visualOutputCache.Html html with
                 | HtmlFrame frame -> renderImage theme imageBackend frame
                 | HtmlUnsupported reason -> textBlock theme.Muted ("[text/html]\n" + reason)
+            | MimeTypes.Html, TextPayload html -> textBlock theme.Muted ("[text/html]\n" + html)
             | MimeTypes.Png, BinaryPayload bytes ->
                 renderImage
                     theme

@@ -73,6 +73,7 @@ type HeaderKey =
     | MY
     | Esc
     | F5
+    | F6
     | CtrlS
     | CtrlC
 
@@ -85,6 +86,7 @@ type HeaderLabel =
     | MarkdownCode
     | Select
     | Run
+    | RunAll
     | Save
     | Quit
 
@@ -132,6 +134,7 @@ module NotebookHeader =
         | MY -> "M/Y"
         | Esc -> "Esc"
         | F5 -> "F5"
+        | F6 -> "F6"
         | CtrlS -> "Ctrl+S"
         | CtrlC -> "Ctrl+C"
 
@@ -145,6 +148,7 @@ module NotebookHeader =
         | MarkdownCode -> "markdown/code"
         | Select -> "select"
         | Run -> "run"
+        | RunAll -> "run all"
         | Save -> "save"
         | Quit -> "quit"
 
@@ -659,6 +663,15 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
                 |> Option.filter (fun cell -> cell.Kind = CellKind.Code)
                 |> Option.map (fun cell -> index, cell))
 
+        let runnableCells () =
+            cells
+            |> List.indexed
+            |> List.choose (fun (index, cell) ->
+                if cell.Kind = CellKind.Code then
+                    Some(index, cell)
+                else
+                    None)
+
         let isSelectedEditor index =
             isEditing () && selection = Selected index
 
@@ -677,6 +690,9 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
 
                   if selectedRunnableCell () |> Option.isSome then
                       { Key = F5; Label = Run }
+
+                  if runnableCells () |> List.isEmpty |> not then
+                      { Key = F6; Label = RunAll }
 
                   if isDirty () && FilePersistence.canSave persistenceMode then
                       { Key = CtrlS; Label = Save }
@@ -914,6 +930,15 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
                 else
                     rebuildCells ()
 
+        let executeCellAsync selectedIndex source =
+            task {
+                try
+                    let! result = fsi.ExecuteAsync(source, CancellationToken.None)
+                    return selectedIndex, result.Output, None
+                with ex ->
+                    return selectedIndex, NotebookOutput.Error ex.Message, Some ex.Message
+            }
+
         let runSelectedAsync () =
             task {
                 match selectedRunnableCell () with
@@ -930,23 +955,66 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
                     setStatus "Running selected cell..."
                     rebuildCells ()
 
-                    try
-                        let! result = fsi.ExecuteAsync(source, CancellationToken.None)
+                    let! selectedIndex, output, error = executeCellAsync selectedIndex source
 
-                        do!
-                            Dispatcher.UIThread.InvokeAsync(fun () ->
-                                cells <- cells |> replaceCellOutput selectedIndex result.Output
-                                withMode Selecting
-                                setStatus "Ready"
-                                rebuildCells ())
-                    with ex ->
-                        do!
-                            Dispatcher.UIThread.InvokeAsync(fun () ->
-                                cells <- cells |> replaceCellOutput selectedIndex (NotebookOutput.Error ex.Message)
-                                withMode Selecting
-                                setStatus "Execution failed."
-                                rebuildCells ())
+                    do!
+                        Dispatcher.UIThread.InvokeAsync(fun () ->
+                            cells <- cells |> replaceCellOutput selectedIndex output
+                            withMode Selecting
+
+                            match error with
+                            | Some _ -> setStatus "Execution failed."
+                            | None -> setStatus "Ready"
+
+                            rebuildCells ())
                 | _ -> ()
+            }
+
+        let runAllAsync () =
+            task {
+                let runnableCells = runnableCells ()
+
+                if not (isRunning ()) && not (List.isEmpty runnableCells) then
+                    applySelectedEdit ()
+                    withMode Running
+                    setStatus (sprintf "Running %d code cells..." runnableCells.Length)
+                    rebuildCells ()
+
+                    let mutable failed = false
+
+                    for index, cell in runnableCells do
+                        if not failed then
+                            do!
+                                Dispatcher.UIThread.InvokeAsync(fun () ->
+                                    selection <- Selected index
+                                    setStatus (sprintf "Running cell %d/%d..." (index + 1) cells.Length)
+                                    rebuildCells ())
+
+                            let source =
+                                cells
+                                |> List.tryItem index
+                                |> Option.map _.Source
+                                |> Option.defaultValue cell.Source
+
+                            let! selectedIndex, output, error = executeCellAsync index source
+
+                            do!
+                                Dispatcher.UIThread.InvokeAsync(fun () ->
+                                    cells <- cells |> replaceCellOutput selectedIndex output
+                                    rebuildCells ())
+
+                            failed <- error.IsSome
+
+                    do!
+                        Dispatcher.UIThread.InvokeAsync(fun () ->
+                            withMode Selecting
+
+                            if failed then
+                                setStatus "Run all stopped after a failed cell."
+                            else
+                                setStatus "Ready"
+
+                            rebuildCells ())
             }
 
         let scroll =
@@ -990,6 +1058,9 @@ type NotebookWindow(path: string, configuration: LfsiConfiguration) as this =
                 elif args.Key = Key.F5 && (selectedRunnableCell () |> Option.isSome) then
                     args.Handled <- true
                     runSelectedAsync () |> ignore
+                elif args.Key = Key.F6 && (runnableCells () |> List.isEmpty |> not) then
+                    args.Handled <- true
+                    runAllAsync () |> ignore
                 elif args.Key = Key.A && args.KeyModifiers = KeyModifiers.None && not (isEditing ()) then
                     args.Handled <- true
                     addCellAbove ()
