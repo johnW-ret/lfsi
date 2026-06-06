@@ -10,12 +10,20 @@ type FsiExecutable =
 
 type FsiConfiguration = { Executable: FsiExecutable }
 
-type LfsiConfiguration = { Fsi: FsiConfiguration }
+type FsAutoCompleteConfiguration = { Enabled: bool }
+
+type LfsiConfiguration =
+    { Fsi: FsiConfiguration
+      FsAutoComplete: FsAutoCompleteConfiguration }
 
 module LfsiConfiguration =
     let private defaultFsi = { Executable = DotnetOnPath }
 
-    let private defaultConfig = { Fsi = defaultFsi }
+    let private defaultFsAutoComplete = { Enabled = true }
+
+    let private defaultConfig =
+        { Fsi = defaultFsi
+          FsAutoComplete = defaultFsAutoComplete }
 
     let private parseFsiExecutable value =
         value
@@ -29,6 +37,11 @@ module LfsiConfiguration =
         | DotnetOnPath -> "dotnet"
         | CustomExecutable path -> path
 
+    let private parseEnabled (value: string) =
+        match Boolean.TryParse value with
+        | true, enabled -> enabled
+        | false, _ -> defaultConfig.FsAutoComplete.Enabled
+
     let load () =
         let configuration =
             ConfigurationBuilder()
@@ -37,4 +50,5 @@ module LfsiConfiguration =
                 .AddJsonFile("lfsi.json", optional = true, reloadOnChange = false)
                 .Build()
 
-        { Fsi = { Executable = parseFsiExecutable configuration["Fsi:ExecutablePath"] } }
+        { Fsi = { Executable = parseFsiExecutable configuration["Fsi:ExecutablePath"] }
+          FsAutoComplete = { Enabled = parseEnabled configuration["FsAutoComplete:Enabled"] } }
