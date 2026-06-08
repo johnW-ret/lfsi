@@ -1,0 +1,52 @@
+name: Prerelease
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Prerelease version, for example 0.1.0-alpha.1"
+        required: true
+        type: string
+      publish:
+        description: "Push package to NuGet"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  prerelease:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - run: dotnet tool restore
+      - run: dotnet fantomas --check .
+      - run: dotnet test tests/Lfsi.Tests/Lfsi.Tests.fsproj --configuration Release
+
+      - name: Pack
+        run: dotnet pack src/Lfsi.App/Lfsi.App.fsproj --configuration Release --output artifacts/packages /p:PackageVersion=${{ inputs.version }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lfsi-${{ inputs.version }}
+          path: artifacts/packages/*.nupkg
+
+      - name: NuGet login (OIDC → temp API key)
+        if: ${{ inputs.publish }}
+        uses: NuGet/login@v1
+        id: login
+        with:
+          user: ${{ secrets.NUGET_USER }}
+
+      - name: Push to NuGet
+        if: ${{ inputs.publish }}
+        run: dotnet nuget push "artifacts/packages/*.nupkg" --api-key "${{ steps.login.outputs.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json --skip-duplicate
