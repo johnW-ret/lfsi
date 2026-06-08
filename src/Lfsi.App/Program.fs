@@ -14,6 +14,7 @@ open Avalonia.Input
 open Avalonia.Interactivity
 open Avalonia.Layout
 open Avalonia.Media
+open Avalonia.Styling
 open Avalonia.Threading
 open Consolonia
 open Consolonia.Themes
@@ -470,6 +471,13 @@ type NotebookWindow(initialPath: string option, configuration: LfsiConfiguration
         // TextBox may adjust the caret after KeyDown; post once to win that ordering.
         Dispatcher.UIThread.Post(fun () -> setEditorCaret nextIndex editor)
 
+    let editorText (editor: TextBox) =
+        editor.Text |> Option.ofObj |> Option.defaultValue ""
+
+    let focusEditorAndMoveCaretToEnd (editor: TextBox) =
+        editor.Focus() |> ignore
+        editor.CaretIndex <- editor.Text.Length
+
     let addEditableCell
         theme
         selectedBrush
@@ -478,8 +486,8 @@ type NotebookWindow(initialPath: string option, configuration: LfsiConfiguration
         imageBackend
         (completionService: ICompletionService)
         (getCompletionContext: string -> int -> CompletionContext)
-        renderCodeSource
-        updateHighlightedCode
+        syntaxPalette
+        getHighlightSpans
         (cellStack: StackPanel)
         onTextChanged
         index
@@ -492,56 +500,100 @@ type NotebookWindow(initialPath: string option, configuration: LfsiConfiguration
         )
         |> ignore
 
-        let editor =
-            TextBox(
-                Text = cell.Source,
-                AcceptsReturn = true,
-                TextWrapping = TextWrapping.NoWrap,
-                Foreground = theme.Text,
-                Background = theme.Dark,
-                MinHeight = 3.0
-            )
-
-        let highlightedEditor =
+        let editor, visual, completionPopup =
             match cell.Kind with
-            | CellKind.Code -> Some(renderCodeSource (editor.Text |> Option.ofObj |> Option.defaultValue ""))
-            | CellKind.Markdown -> None
+            | CellKind.Code ->
+                let textBox =
+                    TextBox(
+                        Text = cell.Source,
+                        AcceptsReturn = true,
+                        TextWrapping = TextWrapping.NoWrap,
+                        Foreground = Brushes.Transparent,
+                        Background = Brushes.Transparent,
+                        MinHeight = 3.0
+                    )
 
-        let completionPopup =
-            match cell.Kind with
-            | CellKind.Code -> Some(EditorCompletion.attach theme editor completionService getCompletionContext)
-            | CellKind.Markdown -> None
+                let highlightBlock =
+                    SyntaxHighlighting.textBlock syntaxPalette (getHighlightSpans cell.Source)
 
-        editor.TextChanged.Add(fun _ ->
-            let editorText = editor.Text |> Option.ofObj |> Option.defaultValue ""
+                highlightBlock.TextWrapping <- TextWrapping.NoWrap
+                highlightBlock.IsHitTestVisible <- false
 
-            onTextChanged cell.Source editorText
+                textBox.TextChanged.Add(fun _ ->
+                    let editorText = textBox.Text |> Option.ofObj |> Option.defaultValue ""
+                    let spans = getHighlightSpans editorText
+                    SyntaxHighlighting.updateTextBlock syntaxPalette spans highlightBlock
+                    onTextChanged cell.Source editorText)
 
-            highlightedEditor
-            |> Option.iter (fun block -> updateHighlightedCode editorText block))
+                textBox.AddHandler(
+                    InputElement.KeyDownEvent,
+                    (fun _ args ->
+                        if
+                            not args.Handled
+                            && args.Key = Key.Delete
+                            && args.PhysicalKey = PhysicalKey.None
+                            && args.KeyModifiers = KeyModifiers.None
+                        then
+                            args.Handled <- true
+                            eraseEditorBackward textBox
+                        elif not args.Handled then
+                            match tryGetWordJumpDirection args with
+                            | Some direction ->
+                                args.Handled <- true
+                                moveEditorCaretByWord direction textBox
+                            | None -> ()),
+                    RoutingStrategies.Tunnel,
+                    true
+                )
 
-        editor.AddHandler(
-            InputElement.KeyDownEvent,
-            (fun _ args ->
-                if
-                    not args.Handled
-                    && args.Key = Key.Delete
-                    && args.PhysicalKey = PhysicalKey.None
-                    && args.KeyModifiers = KeyModifiers.None
-                then
-                    args.Handled <- true
-                    eraseEditorBackward editor
-                elif not args.Handled then
-                    match tryGetWordJumpDirection args with
-                    | Some direction ->
-                        args.Handled <- true
-                        moveEditorCaretByWord direction editor
-                    | None -> ()),
-            RoutingStrategies.Tunnel,
-            true
-        )
+                let popup =
+                    EditorCompletion.attach theme textBox completionService getCompletionContext
 
-        body.Children.Add(editor) |> ignore
+                let grid = Grid(Background = theme.Dark)
+                grid.Children.Add(highlightBlock)
+                grid.Children.Add(textBox)
+
+                textBox, (grid :> Control), Some popup
+
+            | CellKind.Markdown ->
+                let textBox =
+                    TextBox(
+                        Text = cell.Source,
+                        AcceptsReturn = true,
+                        TextWrapping = TextWrapping.NoWrap,
+                        Foreground = theme.Text,
+                        Background = theme.Dark,
+                        MinHeight = 3.0
+                    )
+
+                textBox.TextChanged.Add(fun _ ->
+                    let editorText = textBox.Text |> Option.ofObj |> Option.defaultValue ""
+                    onTextChanged cell.Source editorText)
+
+                textBox.AddHandler(
+                    InputElement.KeyDownEvent,
+                    (fun _ args ->
+                        if
+                            not args.Handled
+                            && args.Key = Key.Delete
+                            && args.PhysicalKey = PhysicalKey.None
+                            && args.KeyModifiers = KeyModifiers.None
+                        then
+                            args.Handled <- true
+                            eraseEditorBackward textBox
+                        elif not args.Handled then
+                            match tryGetWordJumpDirection args with
+                            | Some direction ->
+                                args.Handled <- true
+                                moveEditorCaretByWord direction textBox
+                            | None -> ()),
+                    RoutingStrategies.Tunnel,
+                    true
+                )
+
+                textBox, (textBox :> Control), None
+
+        body.Children.Add(visual) |> ignore
 
         completionPopup
         |> Option.iter (fun completion -> body.Children.Add completion.Popup |> ignore)
@@ -627,9 +679,6 @@ type NotebookWindow(initialPath: string option, configuration: LfsiConfiguration
 
         let renderCellSource cell =
             renderCellSourceControl theme (renderCodeSource >> fun block -> block :> Control) cell
-
-        let updateHighlightedCode source block =
-            SyntaxHighlighting.updateTextBlock syntaxPalette (highlightedCodeSpans source) block
 
         let visualOutputService =
             if richDisplayEnabled then
@@ -733,12 +782,13 @@ type NotebookWindow(initialPath: string option, configuration: LfsiConfiguration
         let applySelectedEdit () =
             selectedEditor ()
             |> Option.iter (fun editor ->
+                let text = editorText editor
                 let currentSource = selectedCell () |> Option.map _.Source |> Option.defaultValue ""
 
-                if editor.Text <> currentSource then
+                if text <> currentSource then
                     selectedIndex ()
                     |> Option.iter (fun index ->
-                        cells <- cells |> replaceCellSource index editor.Text
+                        cells <- cells |> replaceCellSource index text
                         markDocumentDirty ()))
 
         let cellStack = StackPanel(Orientation = Orientation.Vertical, Spacing = 1.0)
@@ -842,8 +892,8 @@ type NotebookWindow(initialPath: string option, configuration: LfsiConfiguration
                                 imageBackend
                                 completionService
                                 (completionContext index)
-                                renderCodeSource
-                                updateHighlightedCode
+                                syntaxPalette
+                                highlightedCodeSpans
                                 cellStack
                                 markDirty
                                 index
@@ -870,10 +920,7 @@ type NotebookWindow(initialPath: string option, configuration: LfsiConfiguration
             updateHeader ()
 
             selectedEditor ()
-            |> Option.iter (fun editor ->
-                Dispatcher.UIThread.Post(fun () ->
-                    editor.Focus() |> ignore
-                    editor.CaretIndex <- editor.Text.Length))
+            |> Option.iter (fun editor -> Dispatcher.UIThread.Post(fun () -> focusEditorAndMoveCaretToEnd editor))
 
             selectedFrame
             |> Option.iter (fun frame -> Dispatcher.UIThread.Post(fun () -> frame.BringIntoView()))
