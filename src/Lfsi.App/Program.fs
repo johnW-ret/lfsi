@@ -546,9 +546,6 @@ type NotebookWindow(initialPath: string option, configuration: LfsiConfiguration
         completionPopup
         |> Option.iter (fun completion -> body.Children.Add completion.Popup |> ignore)
 
-        highlightedEditor
-        |> Option.iter (fun block -> body.Children.Add block |> ignore)
-
         addCellOutputs theme errorBrush visualOutputCache imageBackend body cell
 
         cellStack.Children.Add(
