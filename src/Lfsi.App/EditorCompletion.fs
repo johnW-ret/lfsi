@@ -11,6 +11,8 @@ open Avalonia.Interactivity
 open Avalonia.Threading
 
 module EditorCompletion =
+    type Session = { Popup: Popup; Dismiss: unit -> bool }
+
     let private text (editor: TextBox) =
         editor.Text |> Option.ofObj |> Option.defaultValue ""
 
@@ -109,6 +111,14 @@ module EditorCompletion =
             suggestions.ItemsSource <- null
             popup.IsOpen <- false
 
+        let dismiss () =
+            let wasOpen = popup.IsOpen
+
+            if wasOpen then
+                close ()
+
+            wasOpen
+
         let accept () =
             items
             |> List.tryItem suggestions.SelectedIndex
@@ -183,9 +193,6 @@ module EditorCompletion =
                 elif popup.IsOpen && (args.Key = Key.Enter || args.Key = Key.Tab) then
                     args.Handled <- true
                     accept ()
-                elif popup.IsOpen && args.Key = Key.Escape then
-                    args.Handled <- true
-                    close ()
                 elif args.KeyModifiers = KeyModifiers.Control && args.Key = Key.Space then
                     args.Handled <- true
                     request true),
@@ -193,4 +200,4 @@ module EditorCompletion =
             true
         )
 
-        popup
+        { Popup = popup; Dismiss = dismiss }
