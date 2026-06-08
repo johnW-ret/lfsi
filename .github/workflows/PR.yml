@@ -26,3 +26,4 @@ jobs:
 
       - run: dotnet build src/Lfsi.App/Lfsi.App.fsproj
       - run: dotnet test tests/Lfsi.Tests/Lfsi.Tests.fsproj
+      - run: dotnet pack src/Lfsi.App/Lfsi.App.fsproj --configuration Release --output artifacts/packages /p:PackageVersion=0.0.0-pr.${{ github.run_number }}
