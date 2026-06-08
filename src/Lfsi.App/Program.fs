@@ -2,6 +2,7 @@ namespace Lfsi.App
 
 open System
 open System.Collections.Generic
+open System.Globalization
 open System.IO
 open System.Runtime.InteropServices
 open System.Threading
@@ -103,9 +104,13 @@ type WordJumpDirection =
     | PreviousWord
     | NextWord
 
+type EditorSession =
+    { Editor: TextBox
+      Completion: EditorCompletion.Session option }
+
 type NotebookMode =
     | Selecting
-    | Editing of TextBox option
+    | Editing of EditorSession option
     | Running
 
 type CellSelection =
@@ -257,9 +262,16 @@ type NotebookWindow(initialPath: string option, configuration: LfsiConfiguration
 
     let selectedEditor () =
         match uiState.Mode with
-        | Editing editor -> editor
+        | Editing session -> session |> Option.map _.Editor
         | Selecting
         | Running -> None
+
+    let dismissCompletion () =
+        match uiState.Mode with
+        | Editing(Some session) -> session.Completion |> Option.exists (fun completion -> completion.Dismiss())
+        | Editing None
+        | Selecting
+        | Running -> false
 
     let withMode mode = uiState <- { uiState with Mode = mode }
 
@@ -424,6 +436,28 @@ type NotebookWindow(initialPath: string option, configuration: LfsiConfiguration
         editor.SelectionStart <- index
         editor.SelectionEnd <- index
 
+    let eraseBackward selectionStart selectionEnd caretIndex (text: string) =
+        if selectionStart <> selectionEnd then
+            let start = min selectionStart selectionEnd
+            let finish = max selectionStart selectionEnd
+            text.Remove(start, finish - start), start
+        elif caretIndex > 0 then
+            let start =
+                StringInfo.ParseCombiningCharacters(text)
+                |> Array.tryFindBack (fun index -> index < caretIndex)
+                |> Option.defaultValue (caretIndex - 1)
+
+            text.Remove(start, caretIndex - start), start
+        else
+            text, 0
+
+    let eraseEditorBackward (editor: TextBox) =
+        let text, caretIndex =
+            eraseBackward editor.SelectionStart editor.SelectionEnd editor.CaretIndex editor.Text
+
+        editor.Text <- text
+        setEditorCaret caretIndex editor
+
     let moveEditorCaretByWord direction (editor: TextBox) =
         let text = editor.Text |> Option.ofObj |> Option.defaultValue ""
 
@@ -489,7 +523,15 @@ type NotebookWindow(initialPath: string option, configuration: LfsiConfiguration
         editor.AddHandler(
             InputElement.KeyDownEvent,
             (fun _ args ->
-                if not args.Handled then
+                if
+                    not args.Handled
+                    && args.Key = Key.Delete
+                    && args.PhysicalKey = PhysicalKey.None
+                    && args.KeyModifiers = KeyModifiers.None
+                then
+                    args.Handled <- true
+                    eraseEditorBackward editor
+                elif not args.Handled then
                     match tryGetWordJumpDirection args with
                     | Some direction ->
                         args.Handled <- true
@@ -500,7 +542,9 @@ type NotebookWindow(initialPath: string option, configuration: LfsiConfiguration
         )
 
         body.Children.Add(editor) |> ignore
-        completionPopup |> Option.iter (fun popup -> body.Children.Add popup |> ignore)
+
+        completionPopup
+        |> Option.iter (fun completion -> body.Children.Add completion.Popup |> ignore)
 
         highlightedEditor
         |> Option.iter (fun block -> body.Children.Add block |> ignore)
@@ -517,7 +561,8 @@ type NotebookWindow(initialPath: string option, configuration: LfsiConfiguration
         )
         |> ignore
 
-        editor
+        { Editor = editor
+          Completion = completionPopup }
 
     let replaceCellSource selectedIndex source cells =
         cells
@@ -1217,6 +1262,8 @@ type NotebookWindow(initialPath: string option, configuration: LfsiConfiguration
                 elif args.Key = Key.Enter && not (isEditing ()) then
                     args.Handled <- true
                     beginEditing ()
+                elif args.Key = Key.Escape && dismissCompletion () then
+                    args.Handled <- true
                 elif args.Key = Key.Escape && isEditing () then
                     args.Handled <- true
                     endEditing ()
