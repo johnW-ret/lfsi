@@ -123,3 +123,31 @@ module SyntaxHighlighting =
         let block = TextBlock(TextWrapping = TextWrapping.NoWrap)
         updateTextBlock palette spans block
         block
+
+    let lineSpans (highlightingMode: Mode) (line: string) : HighlightSpan list =
+        match highlightingMode with
+        | Mode.None -> [ { Text = line; Kind = Default } ]
+        | Mode.Some(FSharpCompilerService tokenizer) ->
+            let lineTokenizer = tokenizer.CreateLineTokenizer line
+
+            let rec loop scanState cursor spans =
+                let scanResult = lineTokenizer.ScanToken scanState
+                let tokenOption: FSharpTokenInfo option = fst scanResult
+                let nextState = snd scanResult
+
+                if tokenOption.IsSome then
+                    let token = tokenOption.Value
+                    let left = Math.Clamp(token.LeftColumn, 0, line.Length)
+                    let right = Math.Clamp(token.RightColumn + 1, left, line.Length)
+
+                    let spans =
+                        spans
+                        |> appendSpan (line.Substring(cursor, left - cursor)) Default
+                        |> appendSpan (line.Substring(left, right - left)) (kindForToken token)
+
+                    loop nextState right spans
+                else
+                    let spans = appendSpan (line.Substring(cursor)) Default spans
+                    List.rev spans
+
+            loop FSharpTokenizerLexState.Initial 0 []
