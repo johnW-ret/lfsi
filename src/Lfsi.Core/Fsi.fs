@@ -30,7 +30,7 @@ type FsiSession(?workingDirectory: string, ?executablePath: string, ?enableRichD
         |> Option.defaultValue "dotnet"
 
     let enableRichDisplay = defaultArg enableRichDisplay true
-    let executionTimeout = TimeSpan.FromSeconds 20.0
+    let executionTimeout = TimeSpan.FromSeconds 40.0
     let pollInterval = TimeSpan.FromMilliseconds 50.0
 
     let displayHelpers =
