@@ -359,13 +359,13 @@ type NotebookWindow(initialPath: string option, configuration: LfsiConfiguration
 
         let body = StackPanel(Orientation = Orientation.Vertical, Spacing = 1.0)
 
-        body.Children.Add(
+        let label =
             TextBlock(
                 Text = sprintf "[%02d] %s" (index + 1) (cellKindLabel cell.Kind),
                 Foreground = (if isSelected then theme.Accent else theme.Muted)
             )
-        )
-        |> ignore
+
+        body.Children.Add(label) |> ignore
 
         body.Children.Add(renderCellSource cell) |> ignore
 
@@ -380,7 +380,7 @@ type NotebookWindow(initialPath: string option, configuration: LfsiConfiguration
             )
 
         cellStack.Children.Add(frame) |> ignore
-        frame
+        frame, label
 
     let tryGetWordJumpDirection (args: KeyEventArgs) =
         let hasModifier modifier = args.KeyModifiers.HasFlag modifier
@@ -797,8 +797,19 @@ type NotebookWindow(initialPath: string option, configuration: LfsiConfiguration
 
         let cellStack = StackPanel(Orientation = Orientation.Vertical, Spacing = 1.0)
         let mutable selectedFrame: Control option = None
+        let cellFrames = Dictionary<int, Border>()
+        let cellLabels = Dictionary<int, TextBlock>()
 
         let clearTerminalImages () = terminalImageLayer.Clear()
+
+        let setPreviewSelection index isSelected =
+            match cellFrames.TryGetValue index with
+            | true, frame -> frame.Background <- if isSelected then selectedBrush else theme.Panel
+            | false, _ -> ()
+
+            match cellLabels.TryGetValue index with
+            | true, label -> label.Foreground <- if isSelected then theme.Accent else theme.Muted
+            | false, _ -> ()
 
         let modeLabel () =
             match uiState.Mode with
@@ -881,6 +892,8 @@ type NotebookWindow(initialPath: string option, configuration: LfsiConfiguration
                 withSelectedEditor None
 
             selectedFrame <- None
+            cellFrames.Clear()
+            cellLabels.Clear()
             cellStack.Children.Clear()
 
             cells
@@ -905,7 +918,7 @@ type NotebookWindow(initialPath: string option, configuration: LfsiConfiguration
                         )
                     )
                 else
-                    let frame =
+                    let frame, label =
                         addCellPreview
                             theme
                             selectedBrush
@@ -917,6 +930,9 @@ type NotebookWindow(initialPath: string option, configuration: LfsiConfiguration
                             cellStack
                             index
                             cell
+
+                    cellFrames[index] <- frame
+                    cellLabels[index] <- label
 
                     if selection = Selected index then
                         selectedFrame <- Some frame)
@@ -936,8 +952,16 @@ type NotebookWindow(initialPath: string option, configuration: LfsiConfiguration
                 let next = Math.Clamp(currentIndex + delta, 0, last)
 
                 if next <> currentIndex then
+                    setPreviewSelection currentIndex false
                     selection <- Selected next
-                    rebuildCells ()
+                    setPreviewSelection next true
+                    updateHeader ()
+
+                    match cellFrames.TryGetValue next with
+                    | true, frame ->
+                        selectedFrame <- Some frame
+                        Dispatcher.UIThread.Post(fun () -> frame.BringIntoView())
+                    | false, _ -> rebuildCells ()
             | NoCells
             | Selected _ -> ()
 
