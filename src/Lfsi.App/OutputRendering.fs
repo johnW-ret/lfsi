@@ -502,6 +502,39 @@ module private TerminalImagePlacement =
                     Some(clampedSourceY, clampedSourceHeight, int firstVisibleRow + 1)
             | _ -> Some(0, imageHeight, int (Math.Round point.Y) + 1)
 
+module private SixelErase =
+    let private colorPercent (value: byte) =
+        int (Math.Round(float value * 100.0 / 255.0))
+
+    /// Generate a sixel erase frame in the notebook background color.
+    let sequence (backgroundR, backgroundG, backgroundB) width height =
+        let escape = "\u001b"
+        let builder = StringBuilder()
+        builder.Append(escape).Append("Pq") |> ignore
+        builder.Append(sprintf "\"1;1;%d;%d" width height) |> ignore
+
+        builder.Append(
+            sprintf "#0;2;%d;%d;%d" (colorPercent backgroundR) (colorPercent backgroundG) (colorPercent backgroundB)
+        )
+        |> ignore
+
+        let bandCount = int (Math.Ceiling(float height / 6.0))
+
+        for bandIndex in 0 .. bandCount - 1 do
+            builder.Append("#0") |> ignore
+
+            for _ in 0 .. width - 1 do
+                builder.Append('~') |> ignore
+
+            if bandIndex < bandCount - 1 then
+                builder.Append('-') |> ignore
+
+        builder.Append(escape).Append('\\') |> ignore
+        builder.ToString()
+
+type private ISixelImageControl =
+    abstract ClearSixel: unit -> unit
+
 type private RawTerminalImageControl
     (
         uploadSequence: string,
@@ -566,7 +599,13 @@ type private RawTerminalImageControl
         base.OnDetachedFromVisualTree(args)
 
 type private RawSixelImageControl
-    (imageHeight: int, reservedRows: int, rasterWidth: int, generateSixel: int -> int -> string) as this =
+    (
+        imageHeight: int,
+        reservedRows: int,
+        rasterWidth: int,
+        clearBackground: byte * byte * byte,
+        generateSixel: int -> int -> string
+    ) as this =
     inherit Control(MinHeight = float reservedRows, Height = float reservedRows)
 
     do
@@ -577,6 +616,7 @@ type private RawSixelImageControl
     let mutable lastEmittedRow = 0
     let mutable lastEmittedColumn = 0
     let mutable lastEmittedRows = 0
+    let mutable lastEmittedSourceY = 0
     let mutable lastEmittedSourceHeight = 0
     let mutable isAttached = false
     let mutable cachedSixelData: string option = None
@@ -588,32 +628,12 @@ type private RawSixelImageControl
     let visiblePlacement (topLevel: TopLevel) (point: Point) =
         TerminalImagePlacement.visiblePlacement this imageHeight reservedRows topLevel point
 
-    /// Generate a blank sixel that overwrites old pixel data with empty (no-pixel) bands.
-    let blankSixel width height =
-        let escape = "\u001b"
-        let builder = StringBuilder()
-        builder.Append(escape).Append("Pq") |> ignore
-        builder.Append(sprintf "\"1;1;%d;%d" width height) |> ignore
-        // Define color 0 as black
-        builder.Append("#0;2;0;0;0") |> ignore
-        let bandCount = int (Math.Ceiling(float height / 6.0))
-
-        for bandIndex in 0 .. bandCount - 1 do
-            builder.Append("#0") |> ignore
-
-            for _ in 0 .. width - 1 do
-                builder.Append('?') |> ignore
-
-            if bandIndex < bandCount - 1 then
-                builder.Append('-') |> ignore
-
-        builder.Append(escape).Append('\\') |> ignore
-        builder.ToString()
-
     /// Erase old sixel pixels by overwriting with a blank sixel at the last emitted position.
     let clearOldSixel () =
         if lastEmittedRows > 0 && lastEmittedSourceHeight > 0 then
-            let blankData = blankSixel rasterWidth lastEmittedSourceHeight
+            let blankData =
+                SixelErase.sequence clearBackground rasterWidth lastEmittedSourceHeight
+
             Console.Write(sprintf "\u001b7\u001b[%d;%dH%s\u001b8" lastEmittedRow lastEmittedColumn blankData)
             Console.Out.Flush()
             lastEmittedRows <- 0
@@ -635,8 +655,14 @@ type private RawSixelImageControl
                 | Some(sourceY, sourceHeight, row) ->
                     let row = Math.Max(1, row)
                     let visibleRows = int (Math.Ceiling(float sourceHeight / estimatedPixelsPerRow))
-                    // If position changed, erase old sixel pixels first
-                    if lastEmittedRows > 0 && (lastEmittedRow <> row || lastEmittedColumn <> column) then
+
+                    if
+                        lastEmittedRows > 0
+                        && (lastEmittedRow <> row
+                            || lastEmittedColumn <> column
+                            || lastEmittedSourceY <> sourceY
+                            || lastEmittedSourceHeight <> sourceHeight)
+                    then
                         clearOldSixel ()
 
                     let sixelData = generateSixel sourceY sourceHeight
@@ -646,6 +672,7 @@ type private RawSixelImageControl
                     lastEmittedRow <- row
                     lastEmittedColumn <- column
                     lastEmittedRows <- visibleRows + 1
+                    lastEmittedSourceY <- sourceY
                     lastEmittedSourceHeight <- sourceHeight
                 | None -> clearOldSixel ()
 
@@ -693,6 +720,9 @@ type private RawSixelImageControl
         reEmitTimer.Stop()
         clearOldSixel ()
         base.OnDetachedFromVisualTree(args)
+
+    interface ISixelImageControl with
+        member _.ClearSixel() = clearOldSixel ()
 
 
 type KittyImageBackend(?maxChunkLength: int, ?reservedRows: int) =
@@ -866,13 +896,15 @@ type private SixelRaster =
       Height: int
       Pixels: byte[] }
 
-type SixelImageBackend(?reservedRows: int) =
+type SixelImageBackend(?reservedRows: int, ?clearBackground: byte * byte * byte) =
     let fallbackReservedRows = defaultArg reservedRows 18
+    let clearBackground = defaultArg clearBackground (28uy, 30uy, 34uy)
     let estimatedCellPixelHeight = 16.0
     let maxRasterWidth = 800
     let maxRasterHeight = 320
     let escape = "\u001b"
     let rasterCache = Dictionary<string, SixelRaster>()
+    let activeControls = HashSet<WeakReference<ISixelImageControl>>()
 
     let colorLevel (value: byte) =
         Math.Clamp((int value * 5 + 127) / 255, 0, 5)
@@ -1366,14 +1398,30 @@ type SixelImageBackend(?reservedRows: int) =
         Math.Max(fallbackReservedRows, int (Math.Ceiling(float height / estimatedCellPixelHeight)))
 
     let rawSixelControl (raster: SixelRaster) =
-        RawSixelImageControl(
-            raster.Height,
-            reservedRowsFor raster.Height,
-            raster.Width,
-            (fun sourceY sourceHeight -> sixelSequence raster sourceY sourceHeight)
-        )
-        :> Control
+        let control =
+            RawSixelImageControl(
+                raster.Height,
+                reservedRowsFor raster.Height,
+                raster.Width,
+                clearBackground,
+                (fun sourceY sourceHeight -> sixelSequence raster sourceY sourceHeight)
+            )
 
+        activeControls.Add(WeakReference<ISixelImageControl>(control :> ISixelImageControl))
+        |> ignore
+
+        control :> Control
+
+    let clearActiveControls () =
+        let stale = ResizeArray<WeakReference<ISixelImageControl>>()
+
+        for reference in activeControls do
+            match reference.TryGetTarget() with
+            | true, control -> control.ClearSixel()
+            | false, _ -> stale.Add reference
+
+        for reference in stale do
+            activeControls.Remove reference |> ignore
 
     /// Exposed for smoke tests and focused backend tests; normal rendering goes through RenderImage.
     member _.DiagnosticSixelSequence(width: int, height: int, pixels: byte[], ?sourceY: int, ?sourceHeight: int) =
@@ -1391,6 +1439,10 @@ type SixelImageBackend(?reservedRows: int) =
 
     /// Exposed for tests that verify layout reservation without rendering a control tree.
     member _.DiagnosticReservedRows(height: int) = reservedRowsFor height
+
+    /// Exposed for pixel-level tests of stale-image erasure.
+    member _.DiagnosticClearSixelSequence(width: int, height: int) =
+        SixelErase.sequence clearBackground width height
 
     interface ITerminalImageBackend with
         member _.Protocol = Sixel
@@ -1454,7 +1506,9 @@ type SixelImageBackend(?reservedRows: int) =
                     rawSixelControl raster |> Some
 
     interface ITerminalImageLayer with
-        member _.Clear() = rasterCache.Clear()
+        member _.Clear() =
+            clearActiveControls ()
+            rasterCache.Clear()
 
 type AvaloniaImageBackend(protocol: TerminalGraphicsProtocol) =
     interface ITerminalImageBackend with

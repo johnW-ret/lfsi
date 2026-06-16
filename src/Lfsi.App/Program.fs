@@ -720,7 +720,11 @@ type NotebookWindow(initialPath: string option, configuration: LfsiConfiguration
                 let backend = KittyImageBackend()
                 backend :> ITerminalImageBackend, backend :> ITerminalImageLayer
             | UseTerminalGraphics Sixel ->
-                let backend = SixelImageBackend()
+                let panelColor = theme.Panel.Color
+
+                let backend =
+                    SixelImageBackend(clearBackground = (panelColor.R, panelColor.G, panelColor.B))
+
                 backend :> ITerminalImageBackend, backend :> ITerminalImageLayer
             | UseTerminalGraphics protocol ->
                 let backend = FallbackTerminalImageBackend protocol
@@ -1231,7 +1235,9 @@ type NotebookWindow(initialPath: string option, configuration: LfsiConfiguration
         let scroll =
             ScrollViewer(Content = cellStack, Background = theme.Dark, Focusable = false)
 
-        scroll.ScrollChanged.Add(fun _ -> cellStack.InvalidateVisual())
+        scroll.ScrollChanged.Add(fun _ ->
+            clearTerminalImages ()
+            cellStack.InvalidateVisual())
 
 
 

@@ -114,6 +114,104 @@ module OutputRenderingTests =
             && (px[0] <> 24uy || px[1] <> 24uy || px[2] <> 24uy)
             && (channels = 3 || px[3] <> 0uy))
 
+    type private SixelPixels =
+        { Width: int
+          Height: int
+          Pixels: (int * int * int)[] }
+
+    let private renderSixelPixels (sixel: string) =
+        let parseInt (text: string) startIndex =
+            let mutable index = startIndex
+            let mutable value = 0
+
+            while index < text.Length && Char.IsDigit text[index] do
+                value <- value * 10 + int text[index] - int '0'
+                index <- index + 1
+
+            value, index
+
+        let content =
+            if sixel.StartsWith("\u001bPq") && sixel.EndsWith("\u001b\\") then
+                sixel.Substring(3, sixel.Length - 5)
+            else
+                failwith "Expected a complete sixel DCS sequence."
+
+        let mutable width = 0
+        let mutable height = 0
+        let palette = Collections.Generic.Dictionary<int, int * int * int>()
+        let mutable selectedColor = (0, 0, 0)
+        let mutable pixels = Array.empty<int * int * int>
+        let mutable x = 0
+        let mutable bandY = 0
+
+        let ensurePixels () =
+            if pixels.Length = 0 && width > 0 && height > 0 then
+                pixels <- Array.create (width * height) (0, 0, 0)
+
+        let draw ch =
+            ensurePixels ()
+            let bits = int ch - 63
+
+            for bit in 0..5 do
+                let y = bandY + bit
+
+                if x < width && y < height && (bits &&& (1 <<< bit)) <> 0 then
+                    pixels[y * width + x] <- selectedColor
+
+            x <- x + 1
+
+        let rec drawRepeated count ch =
+            if count > 0 then
+                draw ch
+                drawRepeated (count - 1) ch
+
+        let mutable i = 0
+
+        while i < content.Length do
+            match content[i] with
+            | '"' ->
+                let _, next = parseInt content (i + 1)
+                let _, next = parseInt content (next + 1)
+                let parsedWidth, next = parseInt content (next + 1)
+                let parsedHeight, next = parseInt content (next + 1)
+                width <- parsedWidth
+                height <- parsedHeight
+                ensurePixels ()
+                i <- next
+            | '#' ->
+                let register, next = parseInt content (i + 1)
+
+                if next < content.Length && content[next] = ';' then
+                    let _, next = parseInt content (next + 1)
+                    let r, next = parseInt content (next + 1)
+                    let g, next = parseInt content (next + 1)
+                    let b, next = parseInt content (next + 1)
+                    palette[register] <- (r, g, b)
+                    selectedColor <- palette[register]
+                    i <- next
+                else
+                    selectedColor <- palette[register]
+                    i <- next
+            | '!' ->
+                let count, next = parseInt content (i + 1)
+                drawRepeated count content[next]
+                i <- next + 1
+            | '$' ->
+                x <- 0
+                i <- i + 1
+            | '-' ->
+                x <- 0
+                bandY <- bandY + 6
+                i <- i + 1
+            | ch when ch >= '?' && ch <= '~' ->
+                draw ch
+                i <- i + 1
+            | _ -> i <- i + 1
+
+        { Width = width
+          Height = height
+          Pixels = pixels }
+
     let private pngChunk (name: string) (data: byte[]) =
         [| let length = data.Length
            yield byte ((length >>> 24) &&& 0xFF)
@@ -194,6 +292,35 @@ module OutputRenderingTests =
                   Expect.stringContains sixel ";2;100;0;0" "defines red in the local palette"
                   Expect.stringContains sixel ";2;0;100;0" "defines green in the local palette"
                   Expect.stringContains sixel "~" "emits full sixel columns"
+
+              testCase "sixel clear frame paints the notebook background"
+              <| fun _ ->
+                  let backend = SixelImageBackend(clearBackground = (28uy, 30uy, 34uy))
+                  let clear = backend.DiagnosticClearSixelSequence(5, 7)
+                  let rendered = renderSixelPixels clear
+
+                  Expect.equal rendered.Width 5 "clear width"
+                  Expect.equal rendered.Height 7 "clear height"
+
+                  Expect.all
+                      rendered.Pixels
+                      (fun pixel -> pixel = (11, 12, 13))
+                      "clear should draw background-colored pixels, not empty or black sixels"
+
+              testCase "sixel clear frame removes stale pixels before a scrolled redraw"
+              <| fun _ ->
+                  let backend = SixelImageBackend(clearBackground = (28uy, 30uy, 34uy))
+                  let stale = renderSixelPixels (backend.DiagnosticClearSixelSequence(4, 6))
+                  let canvas = Array.create (stale.Width * stale.Height) (0, 0, 0)
+
+                  Array.fill canvas 0 canvas.Length (100, 0, 0)
+
+                  stale.Pixels |> Array.iteri (fun index pixel -> canvas[index] <- pixel)
+
+                  Expect.all
+                      canvas
+                      (fun pixel -> pixel = (11, 12, 13))
+                      "old chart pixels should be overwritten with background color during scroll"
 
               testCase "sixel backend reserves chart-height output for tiny renders"
               <| fun _ ->
